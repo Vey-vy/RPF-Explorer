@@ -7,7 +7,9 @@ pub fn run() -> tauri::Result<()> {
         .invoke_handler(tauri::generate_handler![
             ipc::choose_game_folder,
             ipc::get_summary,
+            ipc::list_game_directory,
             ipc::open_archive,
+            ipc::preview_game_file,
             ipc::preview_entry,
             ipc::extract_file,
             ipc::extract_folder,

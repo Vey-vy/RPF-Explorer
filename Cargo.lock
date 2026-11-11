@@ -3093,6 +3093,7 @@ dependencies = [
  "rf-formats",
  "rpf-archive",
  "serde",
+ "sha1 0.10.7",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

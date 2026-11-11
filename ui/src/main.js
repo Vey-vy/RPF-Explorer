@@ -1,40 +1,42 @@
 import './style.css';
 
-import {invoke} from '@tauri-apps/api/core';
+import {invoke, isTauri} from '@tauri-apps/api/core';
 import {listen} from '@tauri-apps/api/event';
+import {getCurrentWindow} from '@tauri-apps/api/window';
+import {LogicalSize} from '@tauri-apps/api/dpi';
 
 const games = [
   {
     id: 'max-payne-3',
     name: 'Max Payne 3',
-    formats: 'RPF4',
-    detail: 'Manual key or executable scan'
+    image: '/games/max-payne-3.jpg'
   },
   {
     id: 'gta-iv',
     name: 'GTA IV',
-    formats: 'RPF2 / RPF3',
-    detail: 'Manual key or executable scan'
+    image: '/games/gta-iv.jpg'
   },
   {
     id: 'gta-v',
     name: 'GTA V',
-    formats: 'RPF7',
-    detail: 'Keys acquired from game files'
+    image: '/games/gta-v.jpg'
   },
   {
     id: 'rdr1',
     name: 'Red Dead Redemption',
-    formats: 'RPF6',
-    detail: 'Manual key or executable scan'
+    image: '/games/red-dead-redemption.jpg'
   },
   {
     id: 'rdr2',
     name: 'Red Dead Redemption 2',
-    formats: 'RPF8',
-    detail: 'Keys acquired from game files'
+    image: '/games/red-dead-redemption-2.jpg'
   },
 ];
+
+const windowSizes = {
+  menu: new LogicalSize(1100, 500),
+  explorer: new LogicalSize(1280, 820),
+};
 
 const state = {
   summary: null,
@@ -43,6 +45,8 @@ const state = {
   archiveIndex: null,
   directory: 0,
   selectedEntry: null,
+  selectedGameFile: null,
+  gameFilePreview: null,
   preview: null,
   previewOpen: false,
   previewRequestId: 0,
@@ -50,16 +54,32 @@ const state = {
   globalResults: null,
   globalSearchActive: false,
   globalSkipped: 0,
+  gameTree: new Map(),
+  expandedGameDirectories: new Set(['']),
+  gameTreeGeneration: 0,
   busy: false,
   progress: null,
+  gameLoadProgress: null,
   error: '',
   notice: '',
   mobilePane: 'archives',
 };
 
 const app = document.querySelector('#app');
-const icon = (mark, label = '') =>
-    `<span class="file-mark" aria-hidden="true">${mark}</span>${label}`;
+const icon = (type, label = '') => {
+  const drawings = {
+    folder: '<path d="M2.5 5.5h5l1.5 1.7h7.5v7.3h-14z"/><path d="M2.5 5.5v-2h5l1.5 2"/>',
+    xml: '<path d="m7 7-3 3 3 3M11 7l3 3-3 3"/>',
+    json: '<path d="M7 6.5c-1.5 0-1.5 1-1.5 2v1c0 1-.5 1.5-1.5 1.5 1 0 1.5.5 1.5 1.5v1c0 1 .5 2 1.5 2M11 6.5c1.5 0 1.5 1 1.5 2v1c0 1 .5 1.5 1.5 1.5-1 0-1.5.5-1.5 1.5v1c0 1-.5 2-1.5 2"/>',
+    image: '<rect x="3" y="4" width="10" height="9" rx="1"/><circle cx="6.3" cy="7" r="1"/><path d="m4 12 3-3 2 2 1.5-1.5L13 12"/>',
+    audio: '<path d="M9 12V4l5-1v8"/><circle cx="6.5" cy="12.5" r="2"/><circle cx="11.5" cy="11.5" r="2"/>',
+    resource: '<path d="m8 2.5 5 2.8v5.5l-5 2.8-5-2.8V5.3z"/><path d="m3.3 5.5 4.7 2.7 4.7-2.7M8 8.2v5.2"/>',
+    text: '<path d="M4 5h8M4 8h8M4 11h6"/>',
+    file: '<path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.8v3h2.8"/>',
+  };
+  const shape = drawings[type] || drawings.file;
+  return `<svg class="file-mark file-mark-${type}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${shape}</svg>${label}`;
+};
 const escapeHtml = (value = '') =>
     String(value).replace(/[&<>"']/g, (char) => ({
                                         '&': '&amp;',
@@ -99,103 +119,111 @@ function closePreview() {
   if (!state.previewOpen) return;
   state.previewOpen = false;
   render();
-  app.querySelector('[data-open-preview]')?.focus();
+  if (state.selectedGameFile) {
+    const path = state.selectedGameFile.path;
+    [...app.querySelectorAll('[data-game-file]')]
+        .find((button) => button.dataset.gameFile === path)?.focus();
+    return;
+  }
+  app.querySelector(`[data-entry="${state.selectedEntry}"] .file-name`)?.focus();
 }
 
 function renderHome() {
+  const loadingGame = games.find((game) => game.id === state.selectedGame);
+  if (state.busy && loadingGame) {
+    const progress = state.gameLoadProgress || {
+      stage: 'Preparing',
+      message: 'Choose the game folder to begin.',
+      progress: null,
+    };
+    const percent = Number.isFinite(progress.progress) ?
+        Math.max(0, Math.min(100, progress.progress)) :
+        null;
+    app.innerHTML = `
+      <section class="welcome">
+        <main class="game-load-screen" aria-busy="true">
+          <img class="game-load-art" src="${loadingGame.image}" alt="" draggable="false">
+          <section class="game-load-panel" aria-label="Loading ${escapeHtml(loadingGame.name)}">
+            <p class="game-load-overline">GAME LOAD</p>
+            <h1>${escapeHtml(loadingGame.name)}</h1>
+            <div class="game-load-status" role="status" aria-live="polite">
+              <span class="game-load-stage" data-load-stage>${escapeHtml(progress.stage || 'Loading')}</span>
+              <p data-load-message>${escapeHtml(progress.message || 'Loading game files…')}</p>
+            </div>
+            <div class="game-load-progress-row">
+              <div class="game-load-progress${percent === null ? ' is-indeterminate' : ''}"
+                role="progressbar" aria-label="Game loading progress"
+                aria-valuemin="0" aria-valuemax="100"
+                ${percent === null ? 'aria-valuetext="Progress not currently measurable"' : `aria-valuenow="${percent}"`}>
+                <span data-load-bar ${percent === null ? '' : `style="width: ${percent}%"`}></span>
+              </div>
+              <span class="game-load-percent" data-load-percent>${percent === null ? 'Working…' : `${percent}%`}</span>
+            </div>
+          </section>
+        </main>
+      </section>`;
+    return;
+  }
+
   app.innerHTML = `
     <section class="welcome">
-      <header class="welcome-top">
-        <div class="brand"><span class="brand-symbol">R</span><span>RPF Explorer</span></div>
-        <span class="version-label">DESKTOP TOOL · WINDOWS</span>
-      </header>
-      <div class="welcome-body">
-        <div class="eyebrow"><span class="status-dot"></span> Rockstar archive browser</div>
-        <h1>Choose a game<br /><span>to get started.</span></h1>
-        <p class="intro">Browse archive contents, inspect supported assets, and extract files locally.</p>
-        <div class="game-list" role="list">
-          ${
-      games
-          .map(
-              (game) => `
-            <button class="game-option ${
-                  state.selectedGame === game.id ?
-                      'is-selected' :
-                      ''}" data-game="${game.id}" role="listitem">
-              <span class="game-initial">${
-                  game.name.split(' ')
-                      .map((word) => word[0])
-                      .slice(0, 2)
-                      .join('')}</span>
-              <span class="game-copy"><strong>${game.name}</strong><small>${
-                  game.detail}</small></span>
-              <span class="format-tag">${game.formats}</span>
-              <span class="row-arrow" aria-hidden="true">↗</span>
-            </button>`)
-          .join('')}
+      <main class="library-page" aria-busy="${state.busy}">
+        <div class="game-grid" role="group" aria-label="Choose a supported game">
+          ${games.map((game) => `
+            <button class="game-card" type="button" data-game="${game.id}"
+              aria-label="${escapeHtml(game.name)}" ${state.busy ? 'disabled' : ''}>
+              <img class="game-card-art" src="${game.image}" alt="" draggable="false">
+            </button>`).join('')}
         </div>
-        <div class="setup-area">
-          <div class="setup-heading">
-            <div><span class="section-label">GAME SETUP</span><h2>${
-      state.selectedGame ?
-          escapeHtml(
-              games.find((game) => game.id === state.selectedGame).name) :
-          'Select a game above'}</h2></div>
-            <span class="setup-step">${
-      state.selectedGame ? 'READY TO OPEN' : 'STEP 01 / 02'}</span>
-          </div>
-          ${
-      state.selectedGame && !['gta-v', 'rdr2'].includes(state.selectedGame) ?
-          `
-            <label class="key-field">AES key <span>Optional · 64 hexadecimal characters</span>
-              <input id="key-input" type="password" spellcheck="false" autocomplete="off" placeholder="Leave blank to search game executables" value="${
-              escapeHtml(state.keyInput || '')}" />
-            </label>` :
-          ''}
-          <button class="primary-button" id="choose-folder" ${
-      !state.selectedGame || state.busy ? 'disabled' : ''}>
-            ${
-      state.busy ? '<span class="spinner"></span> Scanning game folder…' :
-                   'Choose game folder <span aria-hidden="true">→</span>'}
-          </button>
-          ${
-      state.error ? `<p class="inline-error" role="alert">${
-                        escapeHtml(state.error)}</p>` :
-                    ''}
-          <p class="privacy-note"><span class="lock-icon" aria-hidden="true">⌑</span> Files stay on this device. No network access is required.</p>
-        </div>
-      </div>
-      <footer class="welcome-footer"><span>RPF Explorer</span><span>RPF2 · RPF3 · RPF4 · RPF6 · RPF7 · RPF8</span></footer>
+        <span class="sr-only" role="status" aria-live="polite">${
+      state.busy ? 'Choose a game folder.' : ''}</span>
+        ${state.error ? `<p class="home-error" role="alert">${escapeHtml(state.error)}</p>` : ''}
+      </main>
     </section>`;
 
-  app.querySelectorAll('[data-game]')
-      .forEach((button) => button.addEventListener('click', () => {
-        state.selectedGame = button.dataset.game;
-        state.error = '';
-        render();
-      }));
-  app.querySelector('#choose-folder')?.addEventListener('click', chooseFolder);
-  app.querySelector('#key-input')?.addEventListener('input', (event) => {
-    state.keyInput = event.target.value;
-  });
+  app.querySelectorAll('[data-game]').forEach((button) =>
+    button.addEventListener('click', () => chooseFolder(button.dataset.game)));
 }
 
-async function chooseFolder() {
+async function resizeWindow(size) {
+  if (!isTauri()) return;
+  try {
+    await getCurrentWindow().setSize(size);
+  } catch (error) {
+    console.error('Unable to resize the application window:', error);
+  }
+}
+
+async function chooseFolder(gameId = state.selectedGame) {
+  if (!gameId || state.busy) return;
+  state.selectedGame = gameId;
   state.previewRequestId++;
   state.previewOpen = false;
   state.selectedEntry = null;
   state.preview = null;
   state.busy = true;
+  state.gameLoadProgress = {
+    stage: 'Preparing',
+    message: 'Choose the game folder to begin.',
+    progress: null,
+  };
   state.error = '';
   render();
   try {
+    await gameLoadProgressReady;
     state.summary = await invoke('choose_game_folder', {
-      gameId: state.selectedGame,
-      keyInput: state.keyInput || null,
+      gameId,
+      keyInput: null,
     });
+    state.gameTreeGeneration++;
+    state.gameTree = new Map([['', {loading: true, entries: null, error: ''}]]);
+    state.expandedGameDirectories = new Set(['']);
+    await resizeWindow(windowSizes.explorer);
     state.archive = null;
     state.archiveIndex = null;
     state.selectedEntry = null;
+    state.selectedGameFile = null;
+    state.gameFilePreview = null;
     state.preview = null;
     state.previewOpen = false;
     state.filter = '';
@@ -205,11 +233,16 @@ async function chooseFolder() {
     state.mobilePane = 'archives';
     state.notice = state.summary.status;
   } catch (error) {
-    state.error = String(error);
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/folder selection cancelled/i.test(message))
+      state.error = message.replace(/^Error:\s*/, '');
   } finally {
     state.busy = false;
+    state.gameLoadProgress = null;
     render();
   }
+  if (state.summary?.gameId && state.gameTree.get('')?.loading)
+    await loadGameDirectory('');
 }
 
 function renderExplorer() {
@@ -229,20 +262,36 @@ function renderExplorer() {
       children;
   const selected =
       archive?.entries.find((entry) => entry.index === state.selectedEntry);
+  const parentDirectory = current?.index && current.index !== 0 ?
+      archive?.entries.find((entry) => entry.index === current.parent) :
+      null;
+  const gameFolderName =
+      summary.root.split(/[\\/]/).filter(Boolean).pop() || summary.gameName;
+  const archiveName = archive?.path.split('/').pop();
 
   app.innerHTML = `
     <section class="workspace mobile-${state.mobilePane}">
       <header class="toolbar">
-        <div class="toolbar-brand"><span class="brand-symbol">R</span><button class="back-button" id="back-games">Games</button><span class="crumb-slash">/</span><strong>${
-      escapeHtml(summary.gameName)}</strong></div>
+        <div class="explorer-navigation">
+          <button class="back-button" id="back-games" title="Back to game library" aria-label="Back to game library">‹</button>
+          <button class="button subtle nav-button" id="up-directory" aria-label="Go up one level" title="Go up one level" ${
+      !parentDirectory ? 'disabled' : ''}>↑</button><span class="crumb-slash">/</span><strong>${
+      escapeHtml(summary.gameName)}</strong>
+        </div>
+        <div class="addressbar" title="${escapeHtml(summary.root)}">
+          <span class="address-place">This PC</span><span class="address-separator">›</span>
+          <span class="address-place">${escapeHtml(gameFolderName)}</span>
+          ${
+      archive ?
+          `<span class="address-separator">›</span><span class="address-place">${escapeHtml(archiveName)}</span><span class="address-subpath">${crumbsHtml(archive, state.directory)}</span>` :
+          '<span class="address-separator">›</span><span class="address-place">Select an archive</span>'}
+        </div>
         <div class="toolbar-actions">
-          <span class="folder-context" title="${escapeHtml(summary.root)}">${
-      escapeHtml(summary.root)}</span>
-          <button class="button subtle" id="open-folder">Open folder</button>
+          <button class="button subtle" id="open-folder">Choose folder…</button>
         </div>
       </header>
       <div class="commandbar">
-        <label class="searchbox"><span aria-hidden="true">⌕</span><input id="filter" type="search" placeholder="Filter this archive…" value="${
+        <label class="searchbox"><span aria-hidden="true">⌕</span><input id="filter" type="search" placeholder="Search in current archive" value="${
       escapeHtml(state.filter)}" ${state.busy ? 'disabled' : ''} /><kbd>Enter · all archives</kbd></label>
         <div class="command-actions">
           <button class="button index-button ${state.globalSearchActive ? 'is-active' : ''} ${
@@ -255,7 +304,7 @@ function renderExplorer() {
           state.globalSearchActive ? 'Search again' : 'Search all archives'}</button>
         </div>
         <nav class="mobile-tabs" aria-label="Explorer views">
-          <button class="${state.mobilePane === 'archives' ? 'active' : ''}" data-pane="archives">Archives <span>${summary.archives.length}</span></button>
+          <button class="${state.mobilePane === 'archives' ? 'active' : ''}" data-pane="archives">Folders</button>
           <button class="${state.mobilePane === 'files' ? 'active' : ''}" data-pane="files" ${
       !archive ? 'disabled' : ''}>Files</button>
           <button class="${state.mobilePane === 'inspector' ? 'active' : ''}" data-pane="inspector" ${
@@ -272,51 +321,24 @@ function renderExplorer() {
                   0}%"></span></div>
       <div class="workarea">
         <aside class="archive-panel">
-          <div class="panel-heading"><div><span class="section-label">LIBRARY</span><h2>Archives</h2></div><span class="count-pill">${
-      summary.archives.length}</span></div>
-          <div class="archive-list">
-            ${
-      summary.archives
-          .map(
-              (item) => `
-              <button class="archive-item ${
-                  state.archiveIndex === item.index ?
-                      'active' :
-                      ''}" data-archive="${item.index}">
-                <span class="archive-icon">RPF</span><span class="archive-name" title="${
-                  escapeHtml(item.path)}">${
-                  escapeHtml(item.path.split('/').pop())}<small>${
-                  item.loaded ? `${item.entryCount.toLocaleString()} entries` :
-                      item.error ? 'Could not open' :
-                                   'Not opened'}</small></span>
-                <span class="archive-state ${
-                  item.error      ? 'bad' :
-                      item.loaded ? 'ready' :
-                                    ''}">${
-                  item.error      ? '!' :
-                      item.loaded ? '●' :
-                                    ''}</span>
-              </button>`)
-          .join('')}
+          <div class="panel-heading"><div><span class="section-label">GAME FOLDER</span><h2>${escapeHtml(gameFolderName)}</h2></div></div>
+          <div class="archive-list game-tree" role="tree" aria-label="Game folder contents">
+            ${renderGameDirectory('', 0, summary)}
           </div>
           <div class="library-status"><span class="status-dot"></span><span>${
       escapeHtml(summary.status)}</span></div>
         </aside>
         <section class="file-panel">
           <div class="file-heading">
-            <div><span class="section-label">${
-      state.globalSearchActive ? 'GLOBAL SEARCH' :
-          archive         ? `${archive.version} ARCHIVE` :
-                            'ARCHIVE CONTENTS'}</span>
+            <div class="file-heading-copy">
               <h2>${
       state.globalSearchActive ?
                   `Results${state.filter ? ` for “${escapeHtml(state.filter)}”` : ''}` :
                   archive                ? escapeHtml(current?.name || archive.path.split('/').pop()) :
                                            'Select an archive'}</h2></div>
-            ${
-      archive && !state.globalSearchActive ?
-                                 `<div class="crumbs">${crumbsHtml(archive, state.directory)}</div>` :
-                                 ''}
+            <span class="item-count">${
+      state.globalSearchActive ? `${state.globalResults?.length || 0} items` :
+          archive ? `${filtered.length} items` : ''}</span>
           </div>
           ${state.globalSearchActive ? `<div class="global-search-state ${state.busy ? 'is-searching' : 'is-complete'}"><span class="global-search-icon">${state.busy ? '◌' : '⌕'}</span><span class="global-search-copy"><strong>${state.busy ? 'Searching all archives' : 'Global archive search'}</strong><small>${state.busy ? `Scanned ${state.progress?.completed || 0} of ${state.progress?.total || summary.archives.length} archives · ${state.progress?.matches || 0} matches so far` : `${state.globalResults?.length || 0} results${state.globalSkipped ? ` · ${state.globalSkipped} skipped` : ''}${state.globalResults?.length === 1000 ? ' · result limit reached' : ''}`}</small></span><button class="clear-search" id="clear-global-search" ${state.busy ? 'disabled' : ''}>Back to files</button></div>` : ''}
           ${
@@ -349,20 +371,41 @@ function renderExplorer() {
                                                              ''}` :
                                                              `${summary.archives.length} archives`}</span></footer>
     </section>
-    ${state.previewOpen && selected && state.preview ? renderPreviewDialog(selected) : ''}`;
+    ${
+      state.previewOpen && state.selectedGameFile ?
+          renderPreviewDialog(state.selectedGameFile, state.gameFilePreview) :
+          state.previewOpen && selected && !selected.isDir ?
+              renderPreviewDialog(selected, state.preview) :
+              ''}`;
 
   app.querySelector('#back-games').addEventListener('click', () => {
+    state.gameTreeGeneration++;
+    state.gameTree.clear();
+    state.expandedGameDirectories.clear();
     state.previewRequestId++;
     state.summary = null;
     state.archive = null;
     state.selectedEntry = null;
+    state.selectedGameFile = null;
+    state.gameFilePreview = null;
     state.preview = null;
     state.previewOpen = false;
     state.error = '';
     state.notice = '';
+    void resizeWindow(windowSizes.menu);
     render();
   });
   app.querySelector('#open-folder').addEventListener('click', chooseFolder);
+  app.querySelector('#up-directory')?.addEventListener('click', () => {
+    if (!parentDirectory) return;
+    state.directory = parentDirectory.index;
+    state.previewRequestId++;
+    state.selectedEntry = null;
+    state.preview = null;
+    state.previewOpen = false;
+    state.filter = '';
+    render();
+  });
   app.querySelector('#index-all').addEventListener('click', searchAll);
   app.querySelector('#clear-global-search')?.addEventListener('click', () => {
     state.globalResults = null;
@@ -398,10 +441,18 @@ function renderExplorer() {
       render();
     }
   });
-  app.querySelectorAll('[data-archive]')
+  app.querySelectorAll('[data-game-dir]')
       .forEach(
           (button) => button.addEventListener(
-              'click', () => openArchive(Number(button.dataset.archive))));
+              'click', () => toggleGameDirectory(button.dataset.gameDir)));
+  app.querySelectorAll('[data-game-archive]')
+      .forEach(
+          (button) => button.addEventListener(
+              'click', () => openArchive(Number(button.dataset.gameArchive))));
+  app.querySelectorAll('[data-game-file]')
+      .forEach(
+          (button) => button.addEventListener(
+              'click', () => openGameFile(button.dataset.gameFile)));
   app.querySelectorAll('[data-directory]')
       .forEach((button) => button.addEventListener('click', () => {
         state.directory = Number(button.dataset.directory);
@@ -442,11 +493,6 @@ function renderExplorer() {
   app.querySelector('#extract-entry')?.addEventListener('click', extractEntry);
   app.querySelector('#extract-folder')
       ?.addEventListener('click', extractFolder);
-  app.querySelector('[data-open-preview]')?.addEventListener('click', () => {
-    state.previewOpen = true;
-    render();
-    app.querySelector('#preview-dialog-close')?.focus();
-  });
   const previewDialog = app.querySelector('#preview-dialog');
   previewDialog?.querySelector('#preview-dialog-close')
       ?.addEventListener('click', closePreview);
@@ -467,7 +513,7 @@ function renderFileTable(entries) {
         'No matching files',
         state.filter ? 'Try a different name or search all archives.' :
                        'This folder is empty.');
-  return `<div class="table-wrap"><table class="file-table"><thead><tr><th>NAME</th><th>TYPE</th><th>SIZE</th></tr></thead><tbody>${
+  return `<div class="table-wrap"><table class="file-table"><thead><tr>  <th>Name</th><th>Size</th><th>Details</th></tr></thead><tbody>${
       entries
           .map(
               (entry) => `
@@ -480,13 +526,91 @@ function renderFileTable(entries) {
                       `aria-label="Open folder ${escapeHtml(entry.name)}" aria-keyshortcuts="Enter"` :
                       ''}>${
                   icon(
-                      entry.isDir ? 'DIR' : markFor(entry.name),
+                      entry.isDir ? 'folder' : markFor(entry.name),
                       escapeHtml(entry.name))}</button></td>
-      <td><span class="type-label">${
-                  entry.isDir ? 'FOLDER' : fileType(entry.name)}</span></td>
       <td class="size-cell">${entry.isDir ? '—' : humanSize(entry.size)}</td>
+      <td class="details-cell">${
+                  entry.isDir ? '—' :
+                      [
+                        entry.resource && 'Resource',
+                        entry.compressed && 'Compressed',
+                        entry.encrypted && 'Encrypted'
+                      ].filter(Boolean).join(' · ') || '—'}</td>
     </tr>`)
           .join('')}</tbody></table></div>`;
+}
+
+function renderGameDirectory(path, depth, summary) {
+  const directory = state.gameTree.get(path);
+  if (!directory)
+    return `<div class="game-tree-message" role="status">Expand a folder to view its contents.</div>`;
+  if (directory.loading && !directory.entries)
+    return `<div class="game-tree-message" role="status">Loading folder contents…</div>`;
+  if (directory.error)
+    return `<div class="game-tree-message game-tree-error" role="alert">${escapeHtml(directory.error)}</div>`;
+  if (!directory.entries?.length)
+    return `<div class="game-tree-message">This folder is empty.</div>`;
+
+  return directory.entries.map((entry) => {
+    const expanded = state.expandedGameDirectories.has(entry.path);
+    const padding = 8 + depth * 14;
+    if (entry.isDir) {
+      return `<div class="game-tree-node"><button class="game-tree-item is-folder" role="treeitem" aria-level="${depth + 1}" aria-expanded="${expanded}" data-game-dir="${escapeHtml(entry.path)}" style="padding-left:${padding}px"><span class="game-tree-toggle" aria-hidden="true">${expanded ? '⌄' : '›'}</span>${icon('folder')}<span class="game-tree-name" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</span></button>${expanded ? `<div class="game-tree-children" role="group">${renderGameDirectory(entry.path, depth + 1, summary)}</div>` : ''}</div>`;
+    }
+
+    const archiveIndex = entry.isArchive ?
+        summary.archives.findIndex(
+            (archive) => archive.path.replace(/\\/g, '/') === entry.path) :
+        -1;
+    const type = markFor(entry.name);
+    const label = `<span class="game-tree-name" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</span>`;
+    const active = archiveIndex >= 0 ?
+        state.archiveIndex === archiveIndex :
+        state.selectedGameFile?.path === entry.path;
+    const button = archiveIndex >= 0 ?
+        `<button class="game-tree-item is-file is-archive${active ? ' active' : ''}" role="treeitem" aria-level="${depth + 1}" data-game-archive="${archiveIndex}" style="padding-left:${padding + 18}px">${icon(type)}${label}</button>` :
+        `<button class="game-tree-item is-file game-tree-openable${active ? ' active' : ''}" role="treeitem" aria-level="${depth + 1}" data-game-file="${escapeHtml(entry.path)}" aria-label="Open ${escapeHtml(entry.name)}" style="padding-left:${padding + 18}px">${icon(type)}${label}</button>`;
+    return `<div class="game-tree-node">${button}</div>`;
+  }).join('');
+}
+
+async function toggleGameDirectory(path) {
+  if (state.expandedGameDirectories.has(path)) {
+    state.expandedGameDirectories.delete(path);
+    render();
+    return;
+  }
+  state.expandedGameDirectories.add(path);
+  render();
+  const directory = state.gameTree.get(path);
+  if (!directory?.entries && !directory?.loading)
+    await loadGameDirectory(path);
+}
+
+async function loadGameDirectory(path) {
+  const generation = state.gameTreeGeneration;
+  const summaryRoot = state.summary?.root;
+  state.gameTree.set(path, {loading: true, entries: null, error: ''});
+  render();
+  try {
+    const entries = await invoke('list_game_directory', {relativePath: path});
+    if (generation !== state.gameTreeGeneration ||
+        summaryRoot !== state.summary?.root)
+      return;
+    state.gameTree.set(path, {loading: false, entries, error: ''});
+  } catch (error) {
+    if (generation !== state.gameTreeGeneration ||
+        summaryRoot !== state.summary?.root)
+      return;
+    const message = error instanceof Error ? error.message : String(error);
+    state.gameTree.set(path, {
+      loading: false,
+      entries: null,
+      error: message.replace(/^Error:\s*/, '')
+    });
+    state.error = message.replace(/^Error:\s*/, '');
+  }
+  render();
 }
 
 function renderGlobalResults() {
@@ -516,8 +640,6 @@ function renderGlobalResults() {
 }
 
 function renderInspector(entry, archive) {
-  const preview = state.preview;
-  const image = preview?.kind === 'image';
   const details = `
     <div class="metadata">
       <div><span>Archive</span><strong>${
@@ -547,25 +669,14 @@ function renderInspector(entry, archive) {
     </div>`;
   return `<div class="inspector-content">
     <div class="selected-file">${
-      icon(entry.isDir ? 'DIR' : markFor(entry.name))}<div><h3 title="${
+      icon(entry.isDir ? 'folder' : markFor(entry.name))}<div><h3 title="${
       escapeHtml(entry.name)}">${escapeHtml(entry.name)}</h3><span>${
       entry.isDir ? 'Folder' : fileType(entry.name)}</span></div></div>
     ${details}
-    <div class="preview-section"><div class="preview-heading"><span class="section-label">PREVIEW</span>${
-      state.preview?.kind === 'text' ?
-          '<span class="preview-note-label">TEXT</span>' :
-          ''}${preview ? `<button class="button subtle small preview-open-button" data-open-preview aria-haspopup="dialog" aria-label="Open full preview of ${escapeHtml(entry.name)}">Expand</button>` : ''}</div>
-      <div class="preview-content">${
-      preview ?
-          renderPreview(preview) :
-          entry.isDir ?
-          '<div class="preview-empty">Folder selected</div>' :
-          '<div class="preview-empty"><span class="loading-ring"></span><span>Preparing preview…</span></div>'}</div>
-    </div>
   </div>`;
 }
 
-function renderPreviewDialog(entry) {
+function renderPreviewDialog(entry, preview = null) {
   return `<dialog class="preview-dialog" id="preview-dialog" aria-modal="true" aria-labelledby="preview-dialog-title" aria-describedby="preview-dialog-path">
     <div class="preview-dialog-panel">
       <header class="preview-dialog-header">
@@ -576,21 +687,343 @@ function renderPreviewDialog(entry) {
         </div>
         <button class="button subtle preview-dialog-close" id="preview-dialog-close" aria-label="Close preview" autofocus>Close <span aria-hidden="true">×</span></button>
       </header>
-      <div class="preview-dialog-content">${renderPreview(state.preview)}</div>
+      <div class="preview-dialog-content" aria-live="polite" aria-busy="${
+      !preview}">${renderPreview(preview)}</div>
       <footer class="preview-dialog-footer"><span>${fileType(entry.name)} · ${humanSize(entry.size)}</span><span>ESC TO CLOSE</span></footer>
     </div>
   </dialog>`;
 }
 
 function renderPreview(preview) {
+  if (!preview)
+    return `<div class="preview-loading" role="status"><span class="loading-ring" aria-hidden="true"></span><span>Preparing preview…</span></div>`;
   if (preview.kind === 'image')
     return `<div class="image-preview"><img src="${
-        preview.content}" alt="Preview of ${
+        escapeHtml(preview.content)}" alt="Preview of ${
         escapeHtml(preview.name)}" /></div>`;
   if (preview.kind === 'text')
-    return `<pre class="text-preview">${escapeHtml(preview.content)}</pre>`;
+    return `<pre class="text-preview">${highlightText(
+        preview.content, preview.name)}</pre>`;
   return `<div class="unsupported-preview"><span class="preview-mark">PREVIEW</span><p>${
       escapeHtml(preview.content)}</p></div>`;
+}
+
+const syntaxExtensions = {
+  markup: new Set(['xml', 'html', 'htm', 'xhtml']),
+  json: new Set(['json']),
+  ini: new Set(['ini', 'cfg', 'conf']),
+  csv: new Set(['csv']),
+  lua: new Set(['lua']),
+};
+const markupEntityPattern = /&(?:#(?:x[\da-f]+|\d+)|[\w.-]+);/iy;
+const jsonNumberPattern = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+const jsonKeywordPattern = /(?:true|false|null)\b/y;
+const iniNumberPattern = /-?(?:0x[\da-f]+|\d+(?:\.\d+)?)/iy;
+const iniKeywordPattern = /(?:true|false|yes|no|on|off|null)\b/iy;
+const csvNumberPattern = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+const luaLongCommentPattern = /--\[(=*)\[/y;
+const luaLongStringPattern = /\[(=*)\[/y;
+const luaNumberPattern = /(?:0x[\da-f]+|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/iy;
+const luaIdentifierPattern = /[A-Za-z_]\w*/y;
+
+function matchAt(pattern, text, index) {
+  pattern.lastIndex = index;
+  return pattern.exec(text);
+}
+
+function highlightText(source, name = '') {
+  const text = String(source ?? '');
+  if (text.length > 500_000) return escapeHtml(text);
+
+  const extension = name.split('.').pop().toLowerCase();
+  if (syntaxExtensions.markup.has(extension))
+    return highlightMarkup(text);
+  if (syntaxExtensions.json.has(extension))
+    return highlightJson(text);
+  if (syntaxExtensions.ini.has(extension))
+    return highlightIni(text);
+  if (syntaxExtensions.csv.has(extension))
+    return highlightCsv(text);
+  if (syntaxExtensions.lua.has(extension))
+    return highlightLua(text);
+  return escapeHtml(text);
+}
+
+function syntaxToken(type, text) {
+  return `<span class="syntax-${type}">${escapeHtml(text)}</span>`;
+}
+
+function highlightMarkup(text) {
+  let output = '';
+  let index = 0;
+  while (index < text.length) {
+    if (text.startsWith('<!--', index)) {
+      const end = text.indexOf('-->', index + 4);
+      const next = end < 0 ? text.length : end + 3;
+      output += syntaxToken('comment', text.slice(index, next));
+      index = next;
+      continue;
+    }
+    if (text.startsWith('<![CDATA[', index)) {
+      const end = text.indexOf(']]>', index + 9);
+      const next = end < 0 ? text.length : end + 3;
+      output += syntaxToken('string', text.slice(index, next));
+      index = next;
+      continue;
+    }
+    if (text[index] === '<' && /[!?/A-Za-z]/.test(text[index + 1] || '')) {
+      output += syntaxToken('punctuation', '<');
+      index++;
+      if (text[index] === '/' || text[index] === '!' || text[index] === '?') {
+        output += syntaxToken('punctuation', text[index]);
+        index++;
+      }
+      const tagStart = index;
+      while (index < text.length && /[\w:.-]/.test(text[index])) index++;
+      if (index > tagStart)
+        output += syntaxToken('tag', text.slice(tagStart, index));
+      while (index < text.length) {
+        if (/\s/.test(text[index])) {
+          output += escapeHtml(text[index++]);
+          continue;
+        }
+        if (text[index] === '"' || text[index] === '\'') {
+          const quote = text[index];
+          const start = index++;
+          while (index < text.length && text[index] !== quote) index++;
+          if (index < text.length) index++;
+          output += syntaxToken('string', text.slice(start, index));
+          continue;
+        }
+        if (text[index] === '>') {
+          output += syntaxToken('punctuation', text[index++]);
+          break;
+        }
+        if (text[index] === '=') {
+          output += syntaxToken('punctuation', text[index++]);
+          continue;
+        }
+        if (/[A-Za-z_:]/.test(text[index])) {
+          const start = index++;
+          while (index < text.length && /[\w:.-]/.test(text[index])) index++;
+          output += syntaxToken('attribute', text.slice(start, index));
+          continue;
+        }
+        output += escapeHtml(text[index++]);
+      }
+      continue;
+    }
+    if (text[index] === '&') {
+      const entity = matchAt(markupEntityPattern, text, index);
+      if (entity) {
+        output += syntaxToken('number', entity[0]);
+        index += entity[0].length;
+        continue;
+      }
+    }
+    output += escapeHtml(text[index++]);
+  }
+  return output;
+}
+
+function highlightJson(text) {
+  let output = '';
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === '"' || char === '\'') {
+      const quote = char;
+      const start = index++;
+      while (index < text.length) {
+        if (text[index] === '\\') {
+          index += Math.min(2, text.length - index);
+          continue;
+        }
+        if (text[index++] === quote) break;
+      }
+      let lookahead = index;
+      while (/\s/.test(text[lookahead] || '') && lookahead < text.length)
+        lookahead++;
+      output += syntaxToken(
+          quote === '"' && text[lookahead] === ':' ? 'key' : 'string',
+          text.slice(start, index));
+      continue;
+    }
+    const number = matchAt(jsonNumberPattern, text, index);
+    if (number) {
+      output += syntaxToken('number', number[0]);
+      index += number[0].length;
+      continue;
+    }
+    const word = matchAt(jsonKeywordPattern, text, index);
+    if (word) {
+      output += syntaxToken('keyword', word[0]);
+      index += word[0].length;
+      continue;
+    }
+    if ('{}[],:'.includes(char)) {
+      output += syntaxToken('punctuation', char);
+      index++;
+      continue;
+    }
+    output += escapeHtml(char);
+    index++;
+  }
+  return output;
+}
+
+function highlightIni(text) {
+  return text.split(/(\r\n|\n|\r)/).map((line, index, parts) => {
+    if (index % 2 === 1) return escapeHtml(line);
+    const trimmed = line.trimStart();
+    if (/^[#;]/.test(trimmed)) return syntaxToken('comment', line);
+    const section = line.match(/^(\s*)(\[[^\]\r\n]*\])(\s*)$/);
+    if (section)
+      return escapeHtml(section[1]) + syntaxToken('tag', section[2]) +
+          escapeHtml(section[3]);
+
+    const keyMatch = line.match(/^(\s*)([^=:#\s][^=:]*?)(\s*)([=:])/);
+    if (!keyMatch) return highlightIniValue(line);
+    const keyEnd = keyMatch[0].length;
+    return escapeHtml(keyMatch[1]) + syntaxToken('key', keyMatch[2]) +
+        escapeHtml(keyMatch[3]) + syntaxToken('punctuation', keyMatch[4]) +
+        highlightIniValue(line.slice(keyEnd));
+  }).join('');
+}
+
+function highlightIniValue(value) {
+  let output = '';
+  let index = 0;
+  while (index < value.length) {
+    if ((value[index] === '#' || value[index] === ';') &&
+        (index === 0 || /\s/.test(value[index - 1]))) {
+      output += syntaxToken('comment', value.slice(index));
+      break;
+    }
+    if (value[index] === '"' || value[index] === '\'') {
+      const quote = value[index];
+      const start = index++;
+      while (index < value.length && value[index] !== quote) index++;
+      if (index < value.length) index++;
+      output += syntaxToken('string', value.slice(start, index));
+      continue;
+    }
+    const number = matchAt(iniNumberPattern, value, index);
+    if (number) {
+      output += syntaxToken('number', number[0]);
+      index += number[0].length;
+      continue;
+    }
+    const word = matchAt(iniKeywordPattern, value, index);
+    if (word) {
+      output += syntaxToken('keyword', word[0]);
+      index += word[0].length;
+      continue;
+    }
+    output += escapeHtml(value[index++]);
+  }
+  return output;
+}
+
+function highlightCsv(text) {
+  let output = '';
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] === '"') {
+      const start = index++;
+      while (index < text.length) {
+        if (text[index] === '"' && text[index + 1] === '"') {
+          index += 2;
+          continue;
+        }
+        if (text[index++] === '"') break;
+      }
+      output += syntaxToken('string', text.slice(start, index));
+      continue;
+    }
+    if (text[index] === ',') {
+      output += syntaxToken('punctuation', text[index++]);
+      continue;
+    }
+    const number = matchAt(csvNumberPattern, text, index);
+    if (number) {
+      output += syntaxToken('number', number[0]);
+      index += number[0].length;
+      continue;
+    }
+    output += escapeHtml(text[index++]);
+  }
+  return output;
+}
+
+function highlightLua(text) {
+  const keywords = new Set([
+    'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function',
+    'goto', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat', 'return',
+    'then', 'true', 'until', 'while'
+  ]);
+  let output = '';
+  let index = 0;
+  while (index < text.length) {
+    if (text.startsWith('--', index)) {
+      const longComment = matchAt(luaLongCommentPattern, text, index);
+      if (longComment) {
+        const close = `]${longComment[1]}]`;
+        const end = text.indexOf(close, index + longComment[0].length);
+        const next = end < 0 ? text.length : end + close.length;
+        output += syntaxToken('comment', text.slice(index, next));
+        index = next;
+      } else {
+        const end = text.indexOf('\n', index);
+        const next = end < 0 ? text.length : end;
+        output += syntaxToken('comment', text.slice(index, next));
+        index = next;
+      }
+      continue;
+    }
+    const longString = matchAt(luaLongStringPattern, text, index);
+    if (longString) {
+      const close = `]${longString[1]}]`;
+      const end = text.indexOf(close, index + longString[0].length);
+      const next = end < 0 ? text.length : end + close.length;
+      output += syntaxToken('string', text.slice(index, next));
+      index = next;
+      continue;
+    }
+    if (text[index] === '"' || text[index] === '\'') {
+      const quote = text[index];
+      const start = index++;
+      while (index < text.length) {
+        if (text[index] === '\\') {
+          index += Math.min(2, text.length - index);
+          continue;
+        }
+        if (text[index++] === quote) break;
+      }
+      output += syntaxToken('string', text.slice(start, index));
+      continue;
+    }
+    const number = matchAt(luaNumberPattern, text, index);
+    if (number) {
+      output += syntaxToken('number', number[0]);
+      index += number[0].length;
+      continue;
+    }
+    const identifier = matchAt(luaIdentifierPattern, text, index);
+    if (identifier) {
+      output += syntaxToken(
+          keywords.has(identifier[0]) ? 'keyword' : 'identifier',
+          identifier[0]);
+      index += identifier[0].length;
+      continue;
+    }
+    if ('+-*/%^#=<>~(){}[];:,.'.includes(text[index])) {
+      output += syntaxToken('punctuation', text[index++]);
+      continue;
+    }
+    output += escapeHtml(text[index++]);
+  }
+  return output;
 }
 
 function renderEmpty(title, description) {
@@ -615,19 +1048,23 @@ function crumbsHtml(archive, directory) {
 
 function markFor(name = '') {
   const ext = name.split('.').pop().toLowerCase();
-  if (['png', 'jpg', 'jpeg', 'dds'].includes(ext)) return 'IMG';
+  if (ext === 'xml' || ext === 'html' || ext === 'htm') return 'xml';
+  if (ext === 'json') return 'json';
+  if (['png', 'jpg', 'jpeg', 'dds'].includes(ext)) return 'image';
+  if (['wav', 'mp3', 'awc', 'ogg', 'bik'].includes(ext)) return 'audio';
+  if (['ydr', 'ydd', 'yft', 'wdr', 'wft', 'wtd'].includes(ext)) return 'resource';
   if ([
-        'txt', 'xml', 'json', 'csv', 'ini', 'cfg', 'meta', 'dat', 'ide', 'ipl'
+        'txt', 'csv', 'ini', 'cfg', 'meta', 'dat', 'ide', 'ipl', 'lua', 'fx'
       ].includes(ext))
-    return 'TXT';
-  if (['ydr', 'ydd', 'yft', 'wdr', 'wft', 'wtd'].includes(ext)) return '3D';
-  if (['wav', 'mp3', 'awc', 'ogg', 'bik'].includes(ext)) return 'AUD';
-  return 'FILE';
+    return 'text';
+  return 'file';
 }
 
 async function openArchive(index) {
   state.previewRequestId++;
   state.previewOpen = false;
+  state.selectedGameFile = null;
+  state.gameFilePreview = null;
   state.selectedEntry = null;
   state.preview = null;
   state.busy = true;
@@ -661,14 +1098,54 @@ async function openArchive(index) {
   }
 }
 
+async function openGameFile(path) {
+  const entry = [...state.gameTree.values()]
+      .flatMap((directory) => directory.entries || [])
+      .find((item) => item.path === path && !item.isDir);
+  if (!entry) return;
+
+  const requestId = ++state.previewRequestId;
+  const summaryRoot = state.summary?.root;
+  state.selectedEntry = null;
+  state.selectedGameFile = entry;
+  state.gameFilePreview = null;
+  state.previewOpen = true;
+  state.error = '';
+  render();
+  try {
+    const preview = await invoke('preview_game_file', {relativePath: path});
+    if (requestId !== state.previewRequestId ||
+        summaryRoot !== state.summary?.root ||
+        state.selectedGameFile?.path !== path)
+      return;
+    state.gameFilePreview = preview;
+  } catch (error) {
+    if (requestId !== state.previewRequestId ||
+        summaryRoot !== state.summary?.root ||
+        state.selectedGameFile?.path !== path)
+      return;
+    const message = error instanceof Error ? error.message : String(error);
+    state.gameFilePreview = {
+      name: entry.name,
+      kind: 'note',
+      content: message.replace(/^Error:\s*/, '')
+    };
+  }
+  render();
+}
+
 async function selectEntry(index) {
   const requestId = ++state.previewRequestId;
   const archiveIndex = state.archiveIndex;
+  const entry = state.archive?.entries.find((item) => item.index === index);
+  state.selectedGameFile = null;
+  state.gameFilePreview = null;
   state.selectedEntry = index;
   state.mobilePane = 'inspector';
   state.preview = null;
-  state.previewOpen = false;
+  state.previewOpen = Boolean(entry && !entry.isDir);
   render();
+  if (!entry || entry.isDir) return;
   try {
     const preview =
         await invoke('preview_entry', {archiveIndex, entryIndex: index});
@@ -769,6 +1246,48 @@ async function extractFolder() {
   render();
 }
 
+const gameLoadProgressReady = listen('game-load-progress', (event) => {
+  const progress = event.payload;
+  if (!state.busy || progress.gameId !== state.selectedGame) return;
+
+  const value = Number.isFinite(progress.progress) ?
+      Math.max(0, Math.min(100, progress.progress)) :
+      null;
+  const previous = state.gameLoadProgress;
+  if (previous?.stage === progress.stage &&
+      Number.isFinite(previous.progress) &&
+      value !== null &&
+      value < previous.progress)
+    return;
+  state.gameLoadProgress = {...progress, progress: value};
+  const stage = app.querySelector('[data-load-stage]');
+  const message = app.querySelector('[data-load-message]');
+  const bar = app.querySelector('[data-load-bar]');
+  const progressBar = app.querySelector('.game-load-progress');
+  const label = app.querySelector('[data-load-percent]');
+  if (stage) stage.textContent = progress.stage || 'Loading';
+  if (message) message.textContent = progress.message || 'Loading game files…';
+  if (bar) {
+    bar.style.width = value === null ? '' : `${value}%`;
+    bar.parentElement?.classList.toggle('is-indeterminate', value === null);
+  }
+  if (progressBar) {
+    if (value === null) {
+      progressBar.removeAttribute('aria-valuenow');
+      progressBar.setAttribute(
+          'aria-valuetext', 'Progress not currently measurable');
+    } else {
+      progressBar.setAttribute('aria-valuenow', String(value));
+      progressBar.setAttribute('aria-valuetext', `${value}% complete`);
+    }
+  }
+  if (label)
+    label.textContent = value === null ? 'Working…' : `${value}%`;
+}).catch((error) => {
+  console.error('Unable to listen for game loading progress:', error);
+  return () => {};
+});
+
 listen('index-progress', (event) => {
   state.progress = event.payload;
   const progress = state.progress;
@@ -794,8 +1313,19 @@ listen('index-progress', (event) => {
 });
 
 invoke('get_summary')
-    .then((summary) => {
+    .then(async (summary) => {
       state.summary = summary.gameId ? summary : null;
+      void resizeWindow(
+          summary.gameId ? windowSizes.explorer : windowSizes.menu);
+      if (state.summary) {
+        state.gameTreeGeneration++;
+        state.gameTree = new Map([['', {loading: true, entries: null, error: ''}]]);
+        state.expandedGameDirectories = new Set(['']);
+      }
       render();
+      if (state.summary) await loadGameDirectory('');
     })
-    .catch(() => render());
+    .catch((error) => {
+      state.error = String(error).replace(/^Error:\s*/, '');
+      render();
+    });

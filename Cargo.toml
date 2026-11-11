@@ -14,6 +14,7 @@ gui = [
     "dep:ddsfile",
     "dep:rpf-archive",
     "dep:rf-formats",
+    "dep:sha1",
 ]
 
 [dependencies]
@@ -32,6 +33,7 @@ image_dds = { version = "0.7", default-features = false, features = ["ddsfile", 
 ddsfile = { version = "0.5", optional = true }
 rpf-archive = { version = "0.10", optional = true }
 rf-formats = { git = "https://github.com/Simomagy/RedForge.git", rev = "bc3daeafe51a9498a2d39cc9e1f2a7319fa87c6e", optional = true }
+sha1 = { version = "0.10", optional = true }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -2,16 +2,22 @@ use crate::keyfinder;
 use crate::rpf::{self, ArchiveInfo, Entry, Key, Kind, Rpf, Version};
 use rayon::prelude::*;
 use serde::Serialize;
+use sha1::{Digest, Sha1};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use std::thread;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 const PREVIEW_LIMIT: usize = 64 * 1024 * 1024;
 const TEXT_PREVIEW_LIMIT: usize = 2 * 1024 * 1024;
 const RESULT_LIMIT: usize = 1000;
+const GTAV_AES_KEY_HASH: [u8; 20] = [
+    0xA0, 0x79, 0x61, 0x28, 0xA7, 0x75, 0x72, 0x0A, 0xC2, 0x04, 0xD9, 0x81, 0x9F, 0x68, 0xC1, 0x72,
+    0xE3, 0x95, 0x2C, 0x6D,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GameId {
@@ -93,6 +99,16 @@ pub struct Summary {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GameDirectoryEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    is_archive: bool,
+    size: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ArchiveSummary {
     index: usize,
     path: String,
@@ -162,6 +178,17 @@ pub struct IndexResponse {
     skipped_archives: usize,
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GameLoadProgress {
+    game_id: String,
+    stage: String,
+    message: String,
+    completed: usize,
+    total: usize,
+    progress: Option<u8>,
+}
+
 #[tauri::command]
 pub fn choose_game_folder(
     app: AppHandle,
@@ -188,7 +215,25 @@ pub fn choose_game_folder(
         return Err("Enter a 64-character hexadecimal AES key.".into());
     }
     state.indexed.store(0, Ordering::Relaxed);
-    let mut data = load_game(folder, game, game_name, supplied_key)?;
+    let cache_dir = if game == GameId::GtaV {
+        Some(
+            app.path()
+                .app_cache_dir()
+                .map_err(|error| format!("Could not access the application cache: {error}"))?
+                .join("gtav-keys"),
+        )
+    } else {
+        None
+    };
+    let mut data = load_game(
+        folder,
+        game,
+        game_name,
+        supplied_key,
+        &app,
+        &game_id,
+        cache_dir.as_deref(),
+    )?;
     data.game_id = Some(game_id);
     let summary = summary_from_data(&data, 0);
     *state
@@ -208,6 +253,183 @@ pub fn get_summary(state: State<'_, ExplorerState>) -> Result<Summary, String> {
         &data,
         state.indexed.load(Ordering::Relaxed),
     ))
+}
+
+#[tauri::command]
+pub fn list_game_directory(
+    state: State<'_, ExplorerState>,
+    relative_path: String,
+) -> Result<Vec<GameDirectoryEntry>, String> {
+    let root_path = {
+        let data = state
+            .inner
+            .lock()
+            .map_err(|_| "Application state is unavailable")?;
+        if data.game_id.is_none() {
+            return Err("No game folder is selected.".into());
+        }
+        data.root.clone()
+    };
+
+    let relative_path = Path::new(&relative_path);
+    if relative_path
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("The requested game folder path is invalid.".into());
+    }
+
+    let root = root_path
+        .canonicalize()
+        .map_err(|error| format!("Could not access the selected game folder: {error}"))?;
+    let directory = root
+        .join(relative_path)
+        .canonicalize()
+        .map_err(|error| format!("Could not access game folder contents: {error}"))?;
+    if !directory.starts_with(&root) || !directory.is_dir() {
+        return Err("The requested path is not a folder inside the selected game folder.".into());
+    }
+
+    let mut entries = std::fs::read_dir(&directory)
+        .map_err(|error| format!("Could not read game folder contents: {error}"))?
+        .map(|entry| {
+            let entry =
+                entry.map_err(|error| format!("Could not read a game folder entry: {error}"))?;
+            let file_type = entry.file_type().map_err(|error| {
+                format!("Could not inspect {}: {error}", entry.path().display())
+            })?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = relative(&root, &entry.path());
+            let is_dir = file_type.is_dir();
+            let is_archive = !is_dir
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("rpf"));
+            let size = if file_type.is_file() {
+                entry
+                    .metadata()
+                    .map_err(|error| {
+                        format!("Could not inspect {}: {error}", entry.path().display())
+                    })?
+                    .len()
+            } else {
+                0
+            };
+            Ok(GameDirectoryEntry {
+                name,
+                path,
+                is_dir,
+                is_archive,
+                size,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    entries.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(entries)
+}
+
+#[tauri::command]
+pub fn preview_game_file(
+    state: State<'_, ExplorerState>,
+    relative_path: String,
+) -> Result<Preview, String> {
+    let root_path = {
+        let data = state
+            .inner
+            .lock()
+            .map_err(|_| "Application state is unavailable")?;
+        if data.game_id.is_none() {
+            return Err("No game folder is selected.".into());
+        }
+        data.root.clone()
+    };
+    let relative_path = Path::new(&relative_path);
+    if relative_path.as_os_str().is_empty()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("The requested game file path is invalid.".into());
+    }
+
+    let root = root_path
+        .canonicalize()
+        .map_err(|error| format!("Could not access the selected game folder: {error}"))?;
+    let file = root
+        .join(relative_path)
+        .canonicalize()
+        .map_err(|error| format!("Could not access game file: {error}"))?;
+    if !file.starts_with(&root) {
+        return Err("The requested file is outside the selected game folder.".into());
+    }
+    let metadata = std::fs::metadata(&file)
+        .map_err(|error| format!("Could not inspect game file: {error}"))?;
+    if !metadata.is_file() {
+        return Err("The requested path is not a file.".into());
+    }
+
+    let name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("The selected game file has an invalid name.")?
+        .to_owned();
+    let extension = extension(&name);
+    if is_text(&extension) {
+        if metadata.len() > TEXT_PREVIEW_LIMIT as u64 {
+            return Ok(Preview {
+                name,
+                kind: "note".into(),
+                content: Some("Text preview is limited to 2 MiB.".into()),
+            });
+        }
+        let bytes =
+            std::fs::read(&file).map_err(|error| format!("Could not read game file: {error}"))?;
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        if text.chars().count() > 12_000 {
+            text = text.chars().take(12_000).collect::<String>() + "\n… Preview truncated";
+        }
+        return Ok(Preview {
+            name,
+            kind: "text".into(),
+            content: Some(text),
+        });
+    }
+    if is_image(&extension) {
+        if metadata.len() > PREVIEW_LIMIT as u64 {
+            return Ok(Preview {
+                name,
+                kind: "note".into(),
+                content: Some("Image preview is limited to 64 MiB.".into()),
+            });
+        }
+        let bytes =
+            std::fs::read(&file).map_err(|error| format!("Could not read game file: {error}"))?;
+        let (mime, preview_bytes) = encode_image(&name, &bytes)?;
+        return Ok(Preview {
+            name,
+            kind: "image".into(),
+            content: Some(format!(
+                "data:image/{};base64,{}",
+                mime,
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, preview_bytes)
+            )),
+        });
+    }
+
+    Ok(Preview {
+        name,
+        kind: "note".into(),
+        content: Some("No preview is available for this file type.".into()),
+    })
 }
 
 #[tauri::command]
@@ -454,46 +676,116 @@ fn load_game(
     game: GameId,
     game_name: &str,
     supplied_key: Option<Key>,
+    app: &AppHandle,
+    game_id: &str,
+    gtav_key_cache: Option<&Path>,
 ) -> Result<ExplorerData, String> {
     if game == GameId::RedDeadRedemption2 {
+        emit_game_load_progress(
+            app,
+            game_id,
+            "opening",
+            "Opening the game archives…",
+            0,
+            0,
+            None,
+        );
         return load_rdr2(folder, game_name);
     }
+    emit_game_load_progress(
+        app,
+        game_id,
+        "scanning",
+        "Scanning the game folder…",
+        0,
+        0,
+        None,
+    );
     let mut archives = Vec::new();
     let mut executables = Vec::new();
+    let mut visited = 0usize;
     for entry in walkdir::WalkDir::new(&folder)
         .into_iter()
         .flatten()
         .filter(|entry| entry.file_type().is_file())
     {
+        visited += 1;
+        if visited.is_multiple_of(512) {
+            emit_game_load_progress(
+                app,
+                game_id,
+                "scanning",
+                &format!("Scanning game files… {visited} checked"),
+                visited,
+                0,
+                None,
+            );
+        }
         let path = entry.into_path();
         if path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("rpf"))
         {
             archives.push(path);
-        } else if (game == GameId::GtaV || supplied_key.is_none())
-            && path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+            && ((game == GameId::GtaV && is_gtav_executable(&path))
+                || (game != GameId::GtaV && supplied_key.is_none()))
         {
             executables.push(path);
         }
+    }
+    if visited > 0 {
+        emit_game_load_progress(
+            app,
+            game_id,
+            "scanning",
+            &format!("Found {} RPF archives", archives.len()),
+            visited,
+            visited,
+            Some(30),
+        );
     }
     archives.sort();
     executables.sort();
     if game == GameId::GtaV {
         executables.sort_by_key(|path| {
-            !path
-                .file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case("GTA5.exe"))
+            !path.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .eq_ignore_ascii_case("GTA5_Enhanced.exe")
+            })
         });
     }
     if archives.is_empty() {
         return Err("No .rpf files found.".into());
     }
+    let archive_total = archives.len();
+    emit_game_load_progress(
+        app,
+        game_id,
+        "archives",
+        &format!("Checking {archive_total} RPF archives…"),
+        0,
+        archive_total,
+        Some(30),
+    );
+    let inspected = AtomicUsize::new(0);
     let supported = archives
         .into_par_iter()
         .filter_map(|path| {
+            let completed = inspected.fetch_add(1, Ordering::Relaxed) + 1;
+            if completed == archive_total || completed.is_multiple_of((archive_total / 80).max(1)) {
+                emit_game_load_progress(
+                    app,
+                    game_id,
+                    "archives",
+                    &format!("Checking RPF archives… {completed} of {archive_total}"),
+                    completed,
+                    archive_total,
+                    Some(30 + (completed * 45 / archive_total.max(1)) as u8),
+                );
+            }
             let info = rpf::inspect(&path).ok()?;
             let matches = match game {
                 GameId::MaxPayne3 => info.version == Version::Rpf4,
@@ -509,12 +801,24 @@ fn load_game(
         return Err("No archives of the selected format were found in this folder.".into());
     }
     let gtav_keys = if game == GameId::GtaV {
-        Some(Arc::new(
-            executables
-                .iter()
-                .find_map(|exe| rpf_archive::GtaKeys::extract_from_exe(exe, None).ok())
-                .ok_or("Could not find GTA V keys in the executables in the selected folder.")?,
-        ))
+        emit_game_load_progress(
+            app,
+            game_id,
+            "keys",
+            "Loading GTA V encryption keys…",
+            0,
+            0,
+            None,
+        );
+        let executable = executables
+            .first()
+            .ok_or("Could not find GTA5.exe or GTA5_Enhanced.exe in the selected game folder.")?;
+        Some(Arc::new(extract_gtav_keys(
+            executable,
+            gtav_key_cache.ok_or("GTA V key cache is unavailable")?,
+            app,
+            game_id,
+        )?))
     } else {
         None
     };
@@ -528,6 +832,15 @@ fn load_game(
             }
             key
         } else {
+            emit_game_load_progress(
+                app,
+                game_id,
+                "keys",
+                "Searching game files for archive keys…",
+                0,
+                0,
+                None,
+            );
             find_key(info, &executables)?
         }
     } else {
@@ -545,6 +858,7 @@ fn load_game(
             })
         })
         .collect::<Vec<_>>();
+    emit_game_load_progress(app, game_id, "ready", "Finishing setup…", 1, 1, Some(100));
     Ok(ExplorerData {
         game_id: None,
         game_name: game_name.into(),
@@ -557,6 +871,180 @@ fn load_game(
         ),
         slots,
     })
+}
+
+fn is_gtav_executable(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        name.eq_ignore_ascii_case("GTA5.exe") || name.eq_ignore_ascii_case("GTA5_Enhanced.exe")
+    })
+}
+
+fn extract_gtav_keys(
+    executable: &Path,
+    cache_dir: &Path,
+    app: &AppHandle,
+    game_id: &str,
+) -> Result<rpf_archive::GtaKeys, String> {
+    match rpf_archive::GtaKeys::load_from_path(cache_dir) {
+        Ok(keys) => return Ok(keys),
+        Err(error) if cache_dir.exists() => {
+            eprintln!("Ignoring unusable cached GTA V encryption keys: {error}");
+        }
+        Err(_) => {}
+    }
+    if !executable.is_file() {
+        return Err(format!(
+            "Could not find GTA5.exe in the selected folder: {}",
+            executable.display()
+        ));
+    }
+
+    emit_game_load_progress(
+        app,
+        game_id,
+        "keys",
+        "Scanning GTA5.exe for its encryption key…",
+        0,
+        0,
+        None,
+    );
+    let exe_file = std::fs::File::open(executable)
+        .map_err(|error| format!("Could not read GTA5.exe: {error}"))?;
+    let executable_data = unsafe { memmap2::Mmap::map(&exe_file) }
+        .map_err(|error| format!("Could not map GTA5.exe: {error}"))?;
+    let key = find_gtav_key(&executable_data, app, game_id)
+        .ok_or("Could not find GTA V encryption keys in GTA5.exe.")?;
+    emit_game_load_progress(
+        app,
+        game_id,
+        "keys",
+        "Building GTA V archive keys…",
+        0,
+        0,
+        Some(97),
+    );
+
+    let temporary_key = write_temporary_key_file(&key)?;
+    let executable = temporary_key.clone();
+    let cache_dir = cache_dir.to_path_buf();
+    let extracted = thread::Builder::new()
+        .name("gtav-key-extraction".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            rpf_archive::GtaKeys::extract_from_exe(&executable, Some(&cache_dir)).map_err(|error| {
+                format!("Could not load GTA V encryption keys from GTA5.exe: {error}")
+            })
+        })
+        .map_err(|error| format!("Could not start GTA V key extraction: {error}"))
+        .and_then(|worker| {
+            worker
+                .join()
+                .map_err(|_| "GTA V key extraction terminated unexpectedly.".to_owned())?
+        });
+    let cleanup = std::fs::remove_file(&temporary_key)
+        .map_err(|error| format!("Could not remove temporary key file: {error}"));
+    match (extracted, cleanup) {
+        (Ok(keys), Ok(())) => Ok(keys),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn find_gtav_key(data: &[u8], app: &AppHandle, game_id: &str) -> Option<[u8; 32]> {
+    const CHUNK_SIZE: usize = 1024 * 1024;
+    let candidate_count = data.len().checked_sub(31)?;
+    let chunk_count = candidate_count.div_ceil(CHUNK_SIZE);
+    let completed = AtomicUsize::new(0);
+    let last_reported = Mutex::new(0usize);
+    let report_interval = (chunk_count / 80).max(1);
+
+    (0..chunk_count)
+        .into_par_iter()
+        .find_map_any(|chunk_index| {
+            let start = chunk_index * CHUNK_SIZE;
+            let end = (start + CHUNK_SIZE).min(candidate_count);
+            for offset in start..end {
+                if Sha1::digest(&data[offset..offset + 32])[..] == GTAV_AES_KEY_HASH {
+                    return Some(data[offset..offset + 32].try_into().ok()?);
+                }
+            }
+
+            let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            if count == chunk_count || count.is_multiple_of(report_interval) {
+                if let Ok(mut previous) = last_reported.lock() {
+                    if count > *previous {
+                        *previous = count;
+                        emit_game_load_progress(
+                            app,
+                            game_id,
+                            "keys",
+                            &format!("Scanning GTA5.exe… {count} of {chunk_count}"),
+                            count,
+                            chunk_count,
+                            Some(75 + (count * 20 / chunk_count.max(1)) as u8),
+                        );
+                    }
+                }
+            }
+            None
+        })
+}
+
+fn write_temporary_key_file(key: &[u8; 32]) -> Result<PathBuf, String> {
+    let temp_dir = std::env::temp_dir();
+    for attempt in 0..10u32 {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| format!("Could not create temporary key file: {error}"))?
+            .as_nanos();
+        let path = temp_dir.join(format!(
+            "rpf-explorer-gtav-key-{}-{timestamp}-{attempt}.tmp",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(key) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(format!("Could not prepare GTA V key extraction: {error}"));
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("Could not prepare GTA V key extraction: {error}"));
+            }
+        }
+    }
+    Err("Could not create a temporary GTA V key file.".into())
+}
+
+fn emit_game_load_progress(
+    app: &AppHandle,
+    game_id: &str,
+    stage: &str,
+    message: &str,
+    completed: usize,
+    total: usize,
+    progress: Option<u8>,
+) {
+    if let Err(error) = app.emit(
+        "game-load-progress",
+        GameLoadProgress {
+            game_id: game_id.to_owned(),
+            stage: stage.to_owned(),
+            message: message.to_owned(),
+            completed,
+            total,
+            progress,
+        },
+    ) {
+        eprintln!("Could not send game loading progress: {error}");
+    }
 }
 
 fn load_rdr2(folder: PathBuf, game_name: &str) -> Result<ExplorerData, String> {
@@ -901,6 +1389,14 @@ mod tests {
         assert!(contains_ascii_case_insensitive("Road.DDS", "road"));
         assert!(!contains_ascii_case_insensitive("Road.DDS", "roads"));
         assert!(contains_ascii_case_insensitive("Road.DDS", ""));
+    }
+
+    #[test]
+    fn recognizes_legacy_and_enhanced_gta_v_executables() {
+        assert!(is_gtav_executable(Path::new("GTA5.exe")));
+        assert!(is_gtav_executable(Path::new("GTA5_Enhanced.exe")));
+        assert!(is_gtav_executable(Path::new("gta5_enhanced.EXE")));
+        assert!(!is_gtav_executable(Path::new("PlayGTAV.exe")));
     }
 }
 
