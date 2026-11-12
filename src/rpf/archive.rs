@@ -74,16 +74,25 @@ impl Rpf {
 
     #[cfg(feature = "gui")]
     pub fn open_gtav(path: &Path, keys: Option<Arc<rpf_archive::GtaKeys>>) -> Result<Rpf, String> {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        Self::open_gtav_with_name(path, name, keys)
+    }
+
+    #[cfg(feature = "gui")]
+    pub fn open_gtav_with_name(
+        path: &Path,
+        archive_name: &str,
+        keys: Option<Arc<rpf_archive::GtaKeys>>,
+    ) -> Result<Rpf, String> {
         let file = File::open(path).map_err(|error| error.to_string())?;
         let data = Arc::new(
             unsafe { memmap2::Mmap::map(&file) }
                 .map_err(|error| format!("Could not map archive: {error}"))?,
         );
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        let archive = rpf_archive::RpfArchive::parse(&data, name, keys.as_deref())
+        let archive = rpf_archive::RpfArchive::parse(&data, archive_name, keys.as_deref())
             .map_err(|error| format!("Could not read RPF7 archive: {error}"))?;
         if archive.version != rpf_archive::RpfVersion::V7 {
             return Err("The selected archive is not in RPF7 format".into());
@@ -496,6 +505,24 @@ mod tests {
         assert_eq!(archive.version, Version::Rpf6);
         assert_eq!(archive.entries[1].name, "$00001234");
         assert_eq!(archive.read_file(1).unwrap(), b"test");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn opens_nested_rpf7_with_its_original_archive_name() {
+        let mut builder = rpf_archive::RpfBuilder::new(rpf_archive::RpfEncryption::Open);
+        builder.add_file("inside.txt", b"nested contents".to_vec());
+        let bytes = builder.build(None).unwrap();
+        let path = temp_archive("random-temporary-name", &bytes);
+
+        let archive = Rpf::open_gtav_with_name(&path, "original.rpf", None).unwrap();
+        assert_eq!(archive.entries.len(), 2);
+        assert_eq!(archive.entries[1].name, "inside.txt");
+        let Some(Backend::GtaV { archive, .. }) = archive.backend.as_ref() else {
+            panic!("RPF7 archive should use the GTA V backend");
+        };
+        assert_eq!(archive.name, "original.rpf");
         std::fs::remove_file(path).unwrap();
     }
 }

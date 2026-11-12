@@ -4,32 +4,40 @@ import {invoke, isTauri} from '@tauri-apps/api/core';
 import {listen} from '@tauri-apps/api/event';
 import {getCurrentWindow} from '@tauri-apps/api/window';
 import {LogicalSize} from '@tauri-apps/api/dpi';
+import {
+  isNativeModelPayload,
+  mountModelViewer,
+  mountNativeModelViewer,
+  renderModelPreview,
+} from './model-viewer.js';
+import {highlightText} from './syntax-highlight.js';
+import {escapeHtml, fileType, humanSize} from './utils.js';
 
 const games = [
   {
     id: 'max-payne-3',
     name: 'Max Payne 3',
-    image: '/games/max-payne-3.jpg'
+    image: 'https://cdn.veyvy.space/data/scdb/screen/mp3.jpg'
   },
   {
     id: 'gta-iv',
     name: 'GTA IV',
-    image: '/games/gta-iv.jpg'
+    image: 'https://cdn.veyvy.space/data/scdb/screen/gtaiv.jpg'
   },
   {
     id: 'gta-v',
     name: 'GTA V',
-    image: '/games/gta-v.jpg'
+    image: 'https://cdn.veyvy.space/data/scdb/screen/gtav_enhanced.jpg'
   },
   {
     id: 'rdr1',
     name: 'Red Dead Redemption',
-    image: '/games/red-dead-redemption.jpg'
+    image: 'https://cdn.veyvy.space/data/scdb/screen/rdr.jpeg'
   },
   {
     id: 'rdr2',
     name: 'Red Dead Redemption 2',
-    image: '/games/red-dead-redemption-2.jpg'
+    image: 'https://cdn.veyvy.space/data/scdb/screen/rdr2.jpg'
   },
 ];
 
@@ -43,6 +51,7 @@ const state = {
   selectedGame: null,
   archive: null,
   archiveIndex: null,
+  archiveStack: [],
   directory: 0,
   selectedEntry: null,
   selectedGameFile: null,
@@ -66,6 +75,7 @@ const state = {
 };
 
 const app = document.querySelector('#app');
+let disposeModelViewer = null;
 const icon = (type, label = '') => {
   const drawings = {
     folder: '<path d="M2.5 5.5h5l1.5 1.7h7.5v7.3h-14z"/><path d="M2.5 5.5v-2h5l1.5 2"/>',
@@ -80,35 +90,9 @@ const icon = (type, label = '') => {
   const shape = drawings[type] || drawings.file;
   return `<svg class="file-mark file-mark-${type}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${shape}</svg>${label}`;
 };
-const escapeHtml = (value = '') =>
-    String(value).replace(/[&<>"']/g, (char) => ({
-                                        '&': '&amp;',
-                                        '<': '&lt;',
-                                        '>': '&gt;',
-                                        '"': '&quot;',
-                                        '\'': '&#39;',
-                                      }[char]));
-const humanSize = (size = 0) => {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
-  if (size < 1024 ** 3) return `${(size / 1024 ** 2).toFixed(1)} MB`;
-  return `${(size / 1024 ** 3).toFixed(1)} GB`;
-};
-const fileType = (name = '') => {
-  const ext = name.split('.').pop().toLowerCase();
-  if (['png', 'jpg', 'jpeg', 'dds'].includes(ext)) return 'IMAGE';
-  if ([
-        'txt', 'xml', 'json', 'csv', 'ini', 'cfg', 'meta', 'dat', 'ide', 'ipl',
-        'lua', 'fx'
-      ].includes(ext))
-    return 'TEXT';
-  if (['ydr', 'ydd', 'yft', 'wdr', 'wft', 'wtd'].includes(ext))
-    return 'RESOURCE';
-  if (['wav', 'mp3', 'awc', 'ogg', 'bik'].includes(ext)) return 'AUDIO';
-  return ext ? ext.toUpperCase() : 'FILE';
-};
-
 function render() {
+  disposeModelViewer?.();
+  disposeModelViewer = null;
   if (!state.summary?.gameId)
     renderHome();
   else
@@ -221,6 +205,7 @@ async function chooseFolder(gameId = state.selectedGame) {
     await resizeWindow(windowSizes.explorer);
     state.archive = null;
     state.archiveIndex = null;
+    state.archiveStack = [];
     state.selectedEntry = null;
     state.selectedGameFile = null;
     state.gameFilePreview = null;
@@ -274,8 +259,11 @@ function renderExplorer() {
       <header class="toolbar">
         <div class="explorer-navigation">
           <button class="back-button" id="back-games" title="Back to game library" aria-label="Back to game library">‹</button>
-          <button class="button subtle nav-button" id="up-directory" aria-label="Go up one level" title="Go up one level" ${
-      !parentDirectory ? 'disabled' : ''}>↑</button><span class="crumb-slash">/</span><strong>${
+          <button class="button subtle nav-button" id="up-directory" aria-label="${
+      parentDirectory ? 'Go up one level' : 'Return to parent archive'}" title="${
+      parentDirectory ? 'Go up one level' : 'Return to parent archive'}" ${
+      !parentDirectory && !state.archiveStack.length ? 'disabled' : ''}>${
+      parentDirectory ? '↑' : state.archiveStack.length ? '↩' : '↑'}</button><span class="crumb-slash">/</span><strong>${
       escapeHtml(summary.gameName)}</strong>
         </div>
         <div class="addressbar" title="${escapeHtml(summary.root)}">
@@ -385,6 +373,7 @@ function renderExplorer() {
     state.previewRequestId++;
     state.summary = null;
     state.archive = null;
+    state.archiveStack = [];
     state.selectedEntry = null;
     state.selectedGameFile = null;
     state.gameFilePreview = null;
@@ -396,11 +385,26 @@ function renderExplorer() {
     render();
   });
   app.querySelector('#open-folder').addEventListener('click', chooseFolder);
-  app.querySelector('#up-directory')?.addEventListener('click', () => {
-    if (!parentDirectory) return;
-    state.directory = parentDirectory.index;
+  app.querySelector('#up-directory')?.addEventListener('click', async () => {
+    if (parentDirectory) {
+      state.directory = parentDirectory.index;
+    } else {
+      const previous = state.archiveStack.pop();
+      if (!previous) return;
+      state.previewRequestId++;
+      try {
+        await invoke('close_nested_archives', {
+          keepArchiveIndex: previous.archiveIndex,
+        });
+      } catch (error) {
+        state.error = String(error).replace(/^Error:\s*/, '');
+      }
+      state.archive = previous.archive;
+      state.archiveIndex = previous.archiveIndex;
+      state.directory = previous.directory;
+      state.selectedEntry = previous.selectedEntry;
+    }
     state.previewRequestId++;
-    state.selectedEntry = null;
     state.preview = null;
     state.previewOpen = false;
     state.filter = '';
@@ -482,9 +486,12 @@ function renderExplorer() {
         if (event.key !== 'Enter') return;
         const item = archive?.entries.find(
             (entry) => entry.index === Number(row.dataset.entry));
-        if (!item?.isDir) return;
+        if (!item) return;
         event.preventDefault();
-        openDirectory(item);
+        if (item.isDir)
+          openDirectory(item);
+        else if (item.name.toLowerCase().endsWith('.rpf'))
+          void openNestedArchive(item.index);
       }));
   app.querySelectorAll('[data-result]')
       .forEach(
@@ -503,8 +510,20 @@ function renderExplorer() {
   previewDialog?.addEventListener('click', (event) => {
     if (event.target === previewDialog) closePreview();
   });
+  previewDialog?.querySelector('[data-model-drawable]')
+      ?.addEventListener('change', (event) => {
+        void selectModelDrawable(Number(event.target.value));
+      });
   if (state.previewOpen && previewDialog && !previewDialog.open)
     previewDialog.showModal();
+  const previewEntry = state.selectedGameFile ||
+      state.archive?.entries.find((entry) => entry.index === state.selectedEntry);
+  const preview = state.selectedGameFile ? state.gameFilePreview : state.preview;
+  if (state.previewOpen && preview?.kind === 'model' &&
+      !isNativeModelPayload(preview))
+    disposeModelViewer = mountModelViewer(previewDialog, preview);
+  else if (state.previewOpen && preview?.kind === 'model')
+    mountNativeModelViewer(previewDialog, preview);
 }
 
 function renderFileTable(entries) {
@@ -677,7 +696,9 @@ function renderInspector(entry, archive) {
 }
 
 function renderPreviewDialog(entry, preview = null) {
-  return `<dialog class="preview-dialog" id="preview-dialog" aria-modal="true" aria-labelledby="preview-dialog-title" aria-describedby="preview-dialog-path">
+  const modelWorkspace = preview?.kind === 'model' ||
+      /\.(?:obj|gltf|glb|ydr|ydd|yft)$/i.test(entry.name);
+  return `<dialog class="preview-dialog${modelWorkspace ? ' is-model-workspace' : ''}" id="preview-dialog" aria-modal="true" aria-labelledby="preview-dialog-title" aria-describedby="preview-dialog-path">
     <div class="preview-dialog-panel">
       <header class="preview-dialog-header">
         <div class="preview-dialog-title">
@@ -697,6 +718,8 @@ function renderPreviewDialog(entry, preview = null) {
 function renderPreview(preview) {
   if (!preview)
     return `<div class="preview-loading" role="status"><span class="loading-ring" aria-hidden="true"></span><span>Preparing preview…</span></div>`;
+  if (preview.kind === 'model')
+    return renderModelPreview(preview);
   if (preview.kind === 'image')
     return `<div class="image-preview"><img src="${
         escapeHtml(preview.content)}" alt="Preview of ${
@@ -708,324 +731,33 @@ function renderPreview(preview) {
       escapeHtml(preview.content)}</p></div>`;
 }
 
-const syntaxExtensions = {
-  markup: new Set(['xml', 'html', 'htm', 'xhtml']),
-  json: new Set(['json']),
-  ini: new Set(['ini', 'cfg', 'conf']),
-  csv: new Set(['csv']),
-  lua: new Set(['lua']),
-};
-const markupEntityPattern = /&(?:#(?:x[\da-f]+|\d+)|[\w.-]+);/iy;
-const jsonNumberPattern = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
-const jsonKeywordPattern = /(?:true|false|null)\b/y;
-const iniNumberPattern = /-?(?:0x[\da-f]+|\d+(?:\.\d+)?)/iy;
-const iniKeywordPattern = /(?:true|false|yes|no|on|off|null)\b/iy;
-const csvNumberPattern = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
-const luaLongCommentPattern = /--\[(=*)\[/y;
-const luaLongStringPattern = /\[(=*)\[/y;
-const luaNumberPattern = /(?:0x[\da-f]+|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/iy;
-const luaIdentifierPattern = /[A-Za-z_]\w*/y;
-
-function matchAt(pattern, text, index) {
-  pattern.lastIndex = index;
-  return pattern.exec(text);
-}
-
-function highlightText(source, name = '') {
-  const text = String(source ?? '');
-  if (text.length > 500_000) return escapeHtml(text);
-
-  const extension = name.split('.').pop().toLowerCase();
-  if (syntaxExtensions.markup.has(extension))
-    return highlightMarkup(text);
-  if (syntaxExtensions.json.has(extension))
-    return highlightJson(text);
-  if (syntaxExtensions.ini.has(extension))
-    return highlightIni(text);
-  if (syntaxExtensions.csv.has(extension))
-    return highlightCsv(text);
-  if (syntaxExtensions.lua.has(extension))
-    return highlightLua(text);
-  return escapeHtml(text);
-}
-
-function syntaxToken(type, text) {
-  return `<span class="syntax-${type}">${escapeHtml(text)}</span>`;
-}
-
-function highlightMarkup(text) {
-  let output = '';
-  let index = 0;
-  while (index < text.length) {
-    if (text.startsWith('<!--', index)) {
-      const end = text.indexOf('-->', index + 4);
-      const next = end < 0 ? text.length : end + 3;
-      output += syntaxToken('comment', text.slice(index, next));
-      index = next;
-      continue;
+async function selectModelDrawable(drawableIndex) {
+    const gameFile = state.selectedGameFile;
+    const selectedEntry = state.selectedEntry;
+    const archiveIndex = state.archiveIndex;
+    const requestId = ++state.previewRequestId;
+    const args = gameFile ?
+        {relativePath: gameFile.path, drawableIndex} :
+        {archiveIndex, entryIndex: selectedEntry, drawableIndex};
+    try {
+      const preview = await invoke(
+          gameFile ? 'preview_game_file' : 'preview_entry', args);
+      if (requestId !== state.previewRequestId ||
+          (gameFile ? state.selectedGameFile?.path !== gameFile.path :
+                      state.selectedEntry !== selectedEntry ||
+                          state.archiveIndex !== archiveIndex))
+        return;
+      if (gameFile)
+        state.gameFilePreview = preview;
+      else
+        state.preview = preview;
+      render();
+    } catch (error) {
+      if (requestId !== state.previewRequestId) return;
+      const status = app.querySelector('[data-native-model-status]');
+      if (status) status.textContent = `Could not render drawable: ${String(error)}`;
     }
-    if (text.startsWith('<![CDATA[', index)) {
-      const end = text.indexOf(']]>', index + 9);
-      const next = end < 0 ? text.length : end + 3;
-      output += syntaxToken('string', text.slice(index, next));
-      index = next;
-      continue;
-    }
-    if (text[index] === '<' && /[!?/A-Za-z]/.test(text[index + 1] || '')) {
-      output += syntaxToken('punctuation', '<');
-      index++;
-      if (text[index] === '/' || text[index] === '!' || text[index] === '?') {
-        output += syntaxToken('punctuation', text[index]);
-        index++;
-      }
-      const tagStart = index;
-      while (index < text.length && /[\w:.-]/.test(text[index])) index++;
-      if (index > tagStart)
-        output += syntaxToken('tag', text.slice(tagStart, index));
-      while (index < text.length) {
-        if (/\s/.test(text[index])) {
-          output += escapeHtml(text[index++]);
-          continue;
-        }
-        if (text[index] === '"' || text[index] === '\'') {
-          const quote = text[index];
-          const start = index++;
-          while (index < text.length && text[index] !== quote) index++;
-          if (index < text.length) index++;
-          output += syntaxToken('string', text.slice(start, index));
-          continue;
-        }
-        if (text[index] === '>') {
-          output += syntaxToken('punctuation', text[index++]);
-          break;
-        }
-        if (text[index] === '=') {
-          output += syntaxToken('punctuation', text[index++]);
-          continue;
-        }
-        if (/[A-Za-z_:]/.test(text[index])) {
-          const start = index++;
-          while (index < text.length && /[\w:.-]/.test(text[index])) index++;
-          output += syntaxToken('attribute', text.slice(start, index));
-          continue;
-        }
-        output += escapeHtml(text[index++]);
-      }
-      continue;
-    }
-    if (text[index] === '&') {
-      const entity = matchAt(markupEntityPattern, text, index);
-      if (entity) {
-        output += syntaxToken('number', entity[0]);
-        index += entity[0].length;
-        continue;
-      }
-    }
-    output += escapeHtml(text[index++]);
   }
-  return output;
-}
-
-function highlightJson(text) {
-  let output = '';
-  let index = 0;
-  while (index < text.length) {
-    const char = text[index];
-    if (char === '"' || char === '\'') {
-      const quote = char;
-      const start = index++;
-      while (index < text.length) {
-        if (text[index] === '\\') {
-          index += Math.min(2, text.length - index);
-          continue;
-        }
-        if (text[index++] === quote) break;
-      }
-      let lookahead = index;
-      while (/\s/.test(text[lookahead] || '') && lookahead < text.length)
-        lookahead++;
-      output += syntaxToken(
-          quote === '"' && text[lookahead] === ':' ? 'key' : 'string',
-          text.slice(start, index));
-      continue;
-    }
-    const number = matchAt(jsonNumberPattern, text, index);
-    if (number) {
-      output += syntaxToken('number', number[0]);
-      index += number[0].length;
-      continue;
-    }
-    const word = matchAt(jsonKeywordPattern, text, index);
-    if (word) {
-      output += syntaxToken('keyword', word[0]);
-      index += word[0].length;
-      continue;
-    }
-    if ('{}[],:'.includes(char)) {
-      output += syntaxToken('punctuation', char);
-      index++;
-      continue;
-    }
-    output += escapeHtml(char);
-    index++;
-  }
-  return output;
-}
-
-function highlightIni(text) {
-  return text.split(/(\r\n|\n|\r)/).map((line, index, parts) => {
-    if (index % 2 === 1) return escapeHtml(line);
-    const trimmed = line.trimStart();
-    if (/^[#;]/.test(trimmed)) return syntaxToken('comment', line);
-    const section = line.match(/^(\s*)(\[[^\]\r\n]*\])(\s*)$/);
-    if (section)
-      return escapeHtml(section[1]) + syntaxToken('tag', section[2]) +
-          escapeHtml(section[3]);
-
-    const keyMatch = line.match(/^(\s*)([^=:#\s][^=:]*?)(\s*)([=:])/);
-    if (!keyMatch) return highlightIniValue(line);
-    const keyEnd = keyMatch[0].length;
-    return escapeHtml(keyMatch[1]) + syntaxToken('key', keyMatch[2]) +
-        escapeHtml(keyMatch[3]) + syntaxToken('punctuation', keyMatch[4]) +
-        highlightIniValue(line.slice(keyEnd));
-  }).join('');
-}
-
-function highlightIniValue(value) {
-  let output = '';
-  let index = 0;
-  while (index < value.length) {
-    if ((value[index] === '#' || value[index] === ';') &&
-        (index === 0 || /\s/.test(value[index - 1]))) {
-      output += syntaxToken('comment', value.slice(index));
-      break;
-    }
-    if (value[index] === '"' || value[index] === '\'') {
-      const quote = value[index];
-      const start = index++;
-      while (index < value.length && value[index] !== quote) index++;
-      if (index < value.length) index++;
-      output += syntaxToken('string', value.slice(start, index));
-      continue;
-    }
-    const number = matchAt(iniNumberPattern, value, index);
-    if (number) {
-      output += syntaxToken('number', number[0]);
-      index += number[0].length;
-      continue;
-    }
-    const word = matchAt(iniKeywordPattern, value, index);
-    if (word) {
-      output += syntaxToken('keyword', word[0]);
-      index += word[0].length;
-      continue;
-    }
-    output += escapeHtml(value[index++]);
-  }
-  return output;
-}
-
-function highlightCsv(text) {
-  let output = '';
-  let index = 0;
-  while (index < text.length) {
-    if (text[index] === '"') {
-      const start = index++;
-      while (index < text.length) {
-        if (text[index] === '"' && text[index + 1] === '"') {
-          index += 2;
-          continue;
-        }
-        if (text[index++] === '"') break;
-      }
-      output += syntaxToken('string', text.slice(start, index));
-      continue;
-    }
-    if (text[index] === ',') {
-      output += syntaxToken('punctuation', text[index++]);
-      continue;
-    }
-    const number = matchAt(csvNumberPattern, text, index);
-    if (number) {
-      output += syntaxToken('number', number[0]);
-      index += number[0].length;
-      continue;
-    }
-    output += escapeHtml(text[index++]);
-  }
-  return output;
-}
-
-function highlightLua(text) {
-  const keywords = new Set([
-    'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function',
-    'goto', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat', 'return',
-    'then', 'true', 'until', 'while'
-  ]);
-  let output = '';
-  let index = 0;
-  while (index < text.length) {
-    if (text.startsWith('--', index)) {
-      const longComment = matchAt(luaLongCommentPattern, text, index);
-      if (longComment) {
-        const close = `]${longComment[1]}]`;
-        const end = text.indexOf(close, index + longComment[0].length);
-        const next = end < 0 ? text.length : end + close.length;
-        output += syntaxToken('comment', text.slice(index, next));
-        index = next;
-      } else {
-        const end = text.indexOf('\n', index);
-        const next = end < 0 ? text.length : end;
-        output += syntaxToken('comment', text.slice(index, next));
-        index = next;
-      }
-      continue;
-    }
-    const longString = matchAt(luaLongStringPattern, text, index);
-    if (longString) {
-      const close = `]${longString[1]}]`;
-      const end = text.indexOf(close, index + longString[0].length);
-      const next = end < 0 ? text.length : end + close.length;
-      output += syntaxToken('string', text.slice(index, next));
-      index = next;
-      continue;
-    }
-    if (text[index] === '"' || text[index] === '\'') {
-      const quote = text[index];
-      const start = index++;
-      while (index < text.length) {
-        if (text[index] === '\\') {
-          index += Math.min(2, text.length - index);
-          continue;
-        }
-        if (text[index++] === quote) break;
-      }
-      output += syntaxToken('string', text.slice(start, index));
-      continue;
-    }
-    const number = matchAt(luaNumberPattern, text, index);
-    if (number) {
-      output += syntaxToken('number', number[0]);
-      index += number[0].length;
-      continue;
-    }
-    const identifier = matchAt(luaIdentifierPattern, text, index);
-    if (identifier) {
-      output += syntaxToken(
-          keywords.has(identifier[0]) ? 'keyword' : 'identifier',
-          identifier[0]);
-      index += identifier[0].length;
-      continue;
-    }
-    if ('+-*/%^#=<>~(){}[];:,.'.includes(text[index])) {
-      output += syntaxToken('punctuation', text[index++]);
-      continue;
-    }
-    output += escapeHtml(text[index++]);
-  }
-  return output;
-}
-
 function renderEmpty(title, description) {
   return `<div class="empty-state"><span class="empty-glyph" aria-hidden="true">R</span><h3>${
       title}</h3><p>${description}</p></div>`;
@@ -1062,6 +794,7 @@ function markFor(name = '') {
 
 async function openArchive(index) {
   state.previewRequestId++;
+  state.archiveStack = [];
   state.previewOpen = false;
   state.selectedGameFile = null;
   state.gameFilePreview = null;
@@ -1098,6 +831,57 @@ async function openArchive(index) {
   }
 }
 
+async function openNestedArchive(entryIndex) {
+  if (state.busy || state.archiveIndex === null) return;
+  const entry = state.archive?.entries.find((item) => item.index === entryIndex);
+  if (!entry || entry.isDir || !entry.name.toLowerCase().endsWith('.rpf'))
+    return;
+
+  const requestId = ++state.previewRequestId;
+  const parent = {
+    archive: state.archive,
+    archiveIndex: state.archiveIndex,
+    directory: state.directory,
+    selectedEntry: state.selectedEntry,
+  };
+  state.busy = true;
+  state.error = '';
+  state.notice = `Opening ${entry.name}…`;
+  state.preview = null;
+  state.previewOpen = false;
+  render();
+  try {
+    const archive = await invoke('open_nested_archive', {
+      parentArchiveIndex: parent.archiveIndex,
+      entryIndex,
+    });
+    if (requestId !== state.previewRequestId ||
+        state.archiveIndex !== parent.archiveIndex)
+      return;
+    state.archiveStack.push(parent);
+    state.archive = archive;
+    state.archiveIndex = archive.index;
+    state.directory = 0;
+    state.selectedEntry = null;
+    state.filter = '';
+    state.globalResults = null;
+    state.globalSearchActive = false;
+    state.globalSkipped = 0;
+    state.mobilePane = 'files';
+    state.notice = `${archive.entries.length.toLocaleString()} entries`;
+  } catch (error) {
+    if (requestId === state.previewRequestId) {
+      state.selectedEntry = entryIndex;
+      state.error = String(error).replace(/^Error:\s*/, '');
+    }
+  } finally {
+    if (requestId === state.previewRequestId) {
+      state.busy = false;
+      render();
+    }
+  }
+}
+
 async function openGameFile(path) {
   const entry = [...state.gameTree.values()]
       .flatMap((directory) => directory.entries || [])
@@ -1113,7 +897,8 @@ async function openGameFile(path) {
   state.error = '';
   render();
   try {
-    const preview = await invoke('preview_game_file', {relativePath: path});
+    const preview = await invoke(
+        'preview_game_file', {relativePath: path, drawableIndex: null});
     if (requestId !== state.previewRequestId ||
         summaryRoot !== state.summary?.root ||
         state.selectedGameFile?.path !== path)
@@ -1135,9 +920,13 @@ async function openGameFile(path) {
 }
 
 async function selectEntry(index) {
+  const entry = state.archive?.entries.find((item) => item.index === index);
+  if (entry && !entry.isDir && entry.name.toLowerCase().endsWith('.rpf')) {
+    await openNestedArchive(index);
+    return;
+  }
   const requestId = ++state.previewRequestId;
   const archiveIndex = state.archiveIndex;
-  const entry = state.archive?.entries.find((item) => item.index === index);
   state.selectedGameFile = null;
   state.gameFilePreview = null;
   state.selectedEntry = index;
@@ -1148,7 +937,11 @@ async function selectEntry(index) {
   if (!entry || entry.isDir) return;
   try {
     const preview =
-        await invoke('preview_entry', {archiveIndex, entryIndex: index});
+        await invoke('preview_entry', {
+          archiveIndex,
+          entryIndex: index,
+          drawableIndex: null
+        });
     if (requestId !== state.previewRequestId ||
         archiveIndex !== state.archiveIndex ||
         index !== state.selectedEntry)
