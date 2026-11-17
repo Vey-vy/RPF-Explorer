@@ -47,6 +47,17 @@ The frontend can also be validated independently:
 npm run build --prefix ui
 ```
 
+## GitHub Releases
+
+The `Build and release` workflow builds Windows MSI and NSIS installers and publishes them as release assets when a `v*` tag is pushed. Set the version in `tauri.conf.json` to match the tag, then push it:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag must match the configured app version (for example, `v0.1.0` for version `0.1.0`).
+
 ## Host the UI on a server
 
 The desktop app has a separate remote-UI build profile. For server deployment steps, HTTPS and Content Security Policy requirements, and the command to build the remote-UI installer, see [docs/ui-hosting.md](docs/ui-hosting.md).
