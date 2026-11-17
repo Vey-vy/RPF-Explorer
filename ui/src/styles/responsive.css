@@ -1,0 +1,140 @@
+@media (max-width: 980px) {
+  .workarea {
+    grid-template-columns: 210px minmax(0, 1fr) 245px;
+  }
+
+  .toolbar {
+    grid-template-columns: minmax(175px, 220px) minmax(100px, 1fr) auto;
+  }
+
+  .searchbox kbd {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .workspace {
+    grid-template-rows: 48px auto 2px minmax(0, 1fr) 28px;
+  }
+
+  .toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 0 8px;
+  }
+
+  .explorer-navigation {
+    gap: 4px;
+  }
+
+  .toolbar .addressbar {
+    display: none;
+  }
+
+  .toolbar-actions {
+    padding: 0;
+  }
+
+  .commandbar {
+    position: relative;
+    flex-wrap: wrap;
+    gap: 7px;
+    padding: 7px 8px 0;
+  }
+
+  .searchbox {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+  }
+
+  .mobile-tabs {
+    display: flex;
+    flex: 0 0 100%;
+    height: 30px;
+    gap: 4px;
+  }
+
+  .mobile-tabs button {
+    min-width: 70px;
+    padding: 0 10px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--quiet);
+    font-size: 11px;
+  }
+
+  .mobile-tabs button.active {
+    border-bottom-color: #aeb3b7;
+    color: var(--text);
+  }
+
+  .mobile-tabs button span {
+    margin-left: 4px;
+    color: var(--quiet);
+    font-family: var(--mono);
+    font-size: 9px;
+  }
+
+  .workarea {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workspace.mobile-archives .file-panel,
+  .workspace.mobile-archives .inspector-panel,
+  .workspace.mobile-files .archive-panel,
+  .workspace.mobile-files .inspector-panel,
+  .workspace.mobile-inspector .archive-panel,
+  .workspace.mobile-inspector .file-panel {
+    display: none;
+  }
+
+  .workspace.mobile-archives .archive-panel,
+  .workspace.mobile-files .file-panel,
+  .workspace.mobile-inspector .inspector-panel {
+    display: flex;
+    border-right: 0;
+    border-left: 0;
+  }
+
+  .file-table {
+    min-width: 510px;
+  }
+
+  .inspector-panel {
+    overflow: auto;
+  }
+}
+
+@media (max-width: 500px) {
+  .game-card-art {
+    object-position: center;
+  }
+
+  .file-table th:nth-child(2),
+  .file-table th:nth-child(4),
+  .file-table td:nth-child(2),
+  .file-table td:nth-child(4) {
+    display: none;
+  }
+
+  .file-table th:nth-child(1) {
+    width: 70%;
+  }
+
+  .file-table th:nth-child(3) {
+    width: 30%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

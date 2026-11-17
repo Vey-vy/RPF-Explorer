@@ -3,7 +3,7 @@ mod entry;
 mod files;
 mod format;
 
-#[cfg(feature = "gui")]
+#[cfg(all(feature = "gui", test))]
 pub(crate) use entry::Backend;
 pub use entry::Rpf;
 #[cfg(feature = "gui")]

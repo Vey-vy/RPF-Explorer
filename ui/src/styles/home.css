@@ -1,0 +1,182 @@
+/* The five local artworks form the entire game chooser surface. */
+.welcome,
+.library-page,
+.game-grid {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.welcome {
+  overflow: hidden;
+  background: #050607;
+}
+
+.library-page {
+  position: relative;
+}
+
+.game-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  overflow: hidden;
+}
+
+.game-card {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: #0b0c0e;
+  cursor: pointer;
+  isolation: isolate;
+}
+
+.game-card-art {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  transform: scale(1);
+  transition: transform 260ms ease;
+}
+
+.game-card:hover .game-card-art,
+.game-card:focus-visible .game-card-art {
+  transform: scale(1.025);
+}
+
+.game-card:focus-visible {
+  z-index: 1;
+  outline: 2px solid #e1e4e6;
+  outline-offset: -3px;
+}
+
+.home-error {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  max-width: min(440px, calc(100% - 24px));
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid #48494a;
+  background: #17191b;
+  color: #e1e2e3;
+  line-height: 1.4;
+  box-shadow: 0 5px 18px #0009;
+}
+
+.game-load-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #08090a;
+}
+
+.game-load-art {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+
+.game-load-panel {
+  position: absolute;
+  left: clamp(16px, 3vw, 34px);
+  bottom: clamp(16px, 4vh, 30px);
+  width: min(520px, calc(100% - 32px));
+  padding: 19px 21px 17px;
+  border: 1px solid #44484b;
+  background: rgba(8, 9, 10, .96);
+  color: #f2f4f5;
+}
+
+.game-load-overline {
+  margin: 0 0 7px;
+  color: #c6cbce;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .12em;
+}
+
+.game-load-panel h1 {
+  margin: 0 0 13px;
+  color: #fff;
+  font-size: clamp(20px, 3vw, 26px);
+  font-weight: 600;
+  letter-spacing: -.025em;
+  line-height: 1.15;
+}
+
+.game-load-status {
+  min-height: 38px;
+  margin-bottom: 15px;
+}
+
+.game-load-stage {
+  display: block;
+  margin-bottom: 3px;
+  color: #e2e5e7;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.game-load-status p {
+  margin: 0;
+  color: #cbd0d3;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.game-load-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.game-load-progress {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  overflow: hidden;
+  border: 1px solid #555a5d;
+  background: #242729;
+}
+
+.game-load-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: #f1f3f4;
+  transition: width 180ms ease-out;
+}
+
+.game-load-progress.is-indeterminate span {
+  width: 34%;
+  animation: game-load-sweep 1.2s ease-in-out infinite alternate;
+}
+
+.game-load-percent {
+  min-width: 52px;
+  color: #f2f4f5;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+@keyframes game-load-sweep {
+  from { transform: translateX(-8%); }
+  to { transform: translateX(205%); }
+}
+

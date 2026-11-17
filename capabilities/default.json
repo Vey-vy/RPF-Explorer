@@ -1,8 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core application window",
+  "description": "Local app and the trusted hosted UI",
   "windows": ["main"],
+  "remote": {
+    "urls": ["https://rpf-ui.veyvy.space/*"]
+  },
   "permissions": [
     "core:default",
     "core:event:default",

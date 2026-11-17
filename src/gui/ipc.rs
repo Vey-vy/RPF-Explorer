@@ -12,6 +12,7 @@ pub(super) mod model_assets;
 pub mod nested;
 pub mod preview;
 pub mod search;
+pub(super) mod texture_preview;
 
 const PREVIEW_LIMIT: usize = 64 * 1024 * 1024;
 const TEXT_PREVIEW_LIMIT: usize = 2 * 1024 * 1024;

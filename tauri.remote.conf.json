@@ -1,0 +1,8 @@
+{
+  "build": {
+    "beforeBuildCommand": null,
+    "beforeDevCommand": null,
+    "devUrl": null,
+    "frontendDist": "https://rpf-ui.veyvy.space"
+  }
+}

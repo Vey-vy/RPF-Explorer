@@ -1,0 +1,359 @@
+/* Preview remains a modal; source text is escaped and only token spans are added. */
+.preview-dialog {
+  width: min(1040px, calc(100vw - 48px));
+  height: min(760px, calc(100dvh - 48px));
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #44494c;
+  border-radius: 4px;
+  background: #090a0b;
+  color: var(--text);
+  box-shadow: 0 22px 80px #000b;
+}
+
+.preview-dialog::backdrop {
+  background: #000b;
+}
+
+.preview-dialog-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) 30px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.preview-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 78px;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: #111315;
+}
+
+.preview-dialog-title {
+  min-width: 0;
+}
+
+.preview-dialog-title h2 {
+  margin: 4px 0 2px;
+  overflow: hidden;
+  color: #e5e7e9;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-dialog-title p {
+  margin: 0;
+  overflow: hidden;
+  color: var(--quiet);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-dialog-close {
+  min-height: 29px;
+  border-color: #3a3e41;
+  background: #1a1c1e;
+  color: #d9dcde;
+}
+
+.preview-dialog-close:hover:not(:disabled) {
+  background: #292c2f;
+  color: #fff;
+}
+
+.preview-dialog-close span {
+  margin-left: 6px;
+  color: #aeb3b7;
+  font-size: 17px;
+  line-height: .8;
+}
+
+.preview-dialog-content {
+  min-height: 0;
+  overflow: auto;
+  background: #070809;
+}
+
+.preview-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 13px;
+  border-top: 1px solid var(--line);
+  background: #111315;
+  color: var(--quiet);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.preview-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  gap: 10px;
+  color: var(--muted);
+}
+
+.loading-ring {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #34383b;
+  border-top-color: #f0f3f5;
+  border-radius: 50%;
+  animation: spin 850ms linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.image-preview {
+  display: grid;
+  width: 100%;
+  min-height: 100%;
+  padding: 16px;
+  place-items: center;
+}
+
+.image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.texture-dictionary-preview {
+  display: grid;
+  grid-template-rows: 36px minmax(0, 1fr) auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  color: #e7e9eb;
+  background: #0a0c0e;
+}
+
+.texture-dictionary-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+}
+
+.texture-dictionary-toolbar strong {
+  color: #e7e9eb;
+  font-weight: 600;
+}
+
+.texture-dictionary-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 42%);
+  min-height: 0;
+}
+
+.texture-dictionary-selected {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+
+.texture-dictionary-image,
+.texture-dictionary-thumb {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background-color: #111416;
+  background-image:
+      linear-gradient(45deg, #1a1e21 25%, transparent 25%),
+      linear-gradient(-45deg, #1a1e21 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #1a1e21 75%),
+      linear-gradient(-45deg, transparent 75%, #1a1e21 75%);
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
+}
+
+.texture-dictionary-image {
+  min-height: 0;
+  padding: 20px;
+}
+
+.texture-dictionary-image img,
+.texture-dictionary-thumb img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: auto;
+}
+
+.texture-dictionary-details {
+  display: grid;
+  gap: 5px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.texture-dictionary-details strong {
+  overflow: hidden;
+  color: #f0f2f3;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.texture-dictionary-details span,
+.texture-dictionary-item small {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.texture-dictionary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px;
+  overflow: auto;
+}
+
+.texture-dictionary-item {
+  display: grid;
+  grid-template-rows: 92px auto auto;
+  gap: 5px;
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid #252a2d;
+  border-radius: 3px;
+  background: #101315;
+  color: #d9dcde;
+  text-align: left;
+  cursor: pointer;
+}
+
+.texture-dictionary-item:hover,
+.texture-dictionary-item.selected {
+  border-color: #8eb6c8;
+}
+
+.texture-dictionary-item strong {
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.texture-dictionary-thumb {
+  width: 100%;
+  height: 92px;
+}
+
+.texture-dictionary-notices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--line);
+  color: #d7bd85;
+  font-size: 10px;
+}
+
+@media (max-width: 680px) {
+  .texture-dictionary-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 42% minmax(0, 1fr);
+  }
+
+  .texture-dictionary-selected {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr);
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .texture-dictionary-image {
+    padding: 8px;
+  }
+
+  .texture-dictionary-details {
+    align-content: center;
+    width: 150px;
+    border-top: 0;
+    border-left: 1px solid var(--line);
+  }
+}
+
+.text-preview {
+  min-height: 100%;
+  margin: 0;
+  padding: 18px 20px;
+  overflow: auto;
+  color: #f0f2f3;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.syntax-tag { color: #a8c9da; }
+.syntax-attribute { color: #c4b1d4; }
+.syntax-key { color: #d8c99a; }
+.syntax-string { color: #a9c69e; }
+.syntax-number { color: #d7ad84; }
+.syntax-keyword { color: #d2a6a6; }
+.syntax-comment { color: #aeb7bd; }
+.syntax-punctuation { color: #d2d9de; }
+.syntax-identifier { color: #f0f2f3; }
+
+.unsupported-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.preview-mark {
+  padding: 4px 7px;
+  border: 1px solid #3d4245;
+  border-radius: 2px;
+  color: #c5c9cc;
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.unsupported-preview p {
+  max-width: 600px;
+  margin: 12px 0 0;
+  line-height: 1.5;
+}
+

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "tauri": "cd .. && tauri"
+    "tauri": "cd .. && tauri",
+    "tauri:remote": "cd .. && tauri build --config tauri.remote.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

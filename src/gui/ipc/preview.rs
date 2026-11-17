@@ -53,6 +53,25 @@ pub fn preview_game_file(
         .ok_or("The selected game file has an invalid name.")?
         .to_owned();
     let extension = extension(&name);
+    if matches!(extension.as_str(), "ytd" | "wtd") {
+        if metadata.len() > PREVIEW_LIMIT as u64 {
+            return Ok(Preview {
+                name,
+                kind: "note".into(),
+                content: Some(format!(
+                    "{} preview is limited to 64 MiB.",
+                    extension.to_ascii_uppercase()
+                )),
+            });
+        }
+        let bytes =
+            std::fs::read(&file).map_err(|error| format!("Could not read game file: {error}"))?;
+        return if extension == "ytd" {
+            texture_preview::preview_ytd(name, &bytes)
+        } else {
+            texture_preview::preview_wtd(name, &bytes)
+        };
+    }
     if is_model(&extension) {
         if metadata.len() > MODEL_PREVIEW_LIMIT as u64 {
             return Ok(model_preview_note(
@@ -148,6 +167,26 @@ pub fn preview_entry(
     }
     let name = entry.name.clone();
     let extension = extension(&name);
+    if matches!(extension.as_str(), "ytd" | "wtd") {
+        if entry.size() as usize > PREVIEW_LIMIT {
+            return Ok(Preview {
+                name,
+                kind: "note".into(),
+                content: Some(format!(
+                    "{} preview is limited to 64 MiB.",
+                    extension.to_ascii_uppercase()
+                )),
+            });
+        }
+        let bytes = rpf
+            .read_file(entry_index)
+            .map_err(|error| format!("Could not read texture dictionary: {error}"))?;
+        return if extension == "ytd" {
+            texture_preview::preview_ytd(name, &bytes)
+        } else {
+            texture_preview::preview_wtd(name, &bytes)
+        };
+    }
     if is_model(&extension) {
         if entry.size() as usize > MODEL_PREVIEW_LIMIT {
             return Ok(model_preview_note(

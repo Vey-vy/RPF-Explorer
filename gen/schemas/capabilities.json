@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Core application window","local":true,"windows":["main"],"permissions":["core:default","core:event:default","core:window:allow-set-size"]}}
+{"default":{"identifier":"default","description":"Local app and the trusted hosted UI","remote":{"urls":["https://rpf-ui.veyvy.space/*"]},"local":true,"windows":["main"],"permissions":["core:default","core:event:default","core:window:allow-set-size"]}}
